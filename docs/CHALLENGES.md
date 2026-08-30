@@ -624,3 +624,50 @@ TSan clean at 1 writer + 8 readers** in both the skip-list and memtable suites. 
 this layer.
 
 ---
+
+## B10 🎓💾 Truncating a log at a record boundary is a *clean* EOF, not a torn tail
+
+**Symptom.** The exhaustive truncation test — write five records, truncate at every one of
+the 87 possible byte offsets, assert recovery yields a clean prefix — failed at exactly
+five offsets: 16, 30, 44, 60, 74.
+
+**How I isolated it.** The offsets were the tell. The file header is 16 bytes and each
+record is 9 + payload, so 16, 30, 44, 60, 74 are precisely the **record boundaries**. A
+failure at every boundary and nowhere else is not a corruption bug; it is a definition
+problem.
+
+**Root cause.** My assertion was:
+
+> if fewer records came back than were written, recovery must report a *reason* other than
+> clean EOF.
+
+That is wrong, and the reason is worth stating precisely: **a log truncated exactly at a
+record boundary is byte-for-byte identical to a log that simply had fewer records written
+to it.** There is no torn record, no partial header, nothing to detect — and no reader
+could distinguish the two, because there is no difference. Reporting `kEof` is the only
+correct answer.
+
+**Fix.** The assertion now computes how many bytes the returned records account for, and
+demands a non-EOF reason only when the truncation point falls *strictly inside* a record.
+
+**Why I am keeping a test bug in this journal.** Because the underlying property is one an
+interviewer can reasonably probe — *"how does recovery know the log ended cleanly rather
+than being cut off?"* — and the honest answer is: **at a record boundary it does not know,
+and it does not need to.** Durability is not "detect every truncation"; it is "never
+return a record that was not fully written." A `sync=false` tail that vanishes at a
+boundary was never acknowledged, so losing it is correct. Writing the assertion too
+strongly is what forced me to articulate that, which is the same shape as B9: the test was
+wrong because I had not stated the invariant sharply enough to test it.
+
+**Generalizes to.** **"The system must detect X" is often the wrong requirement; "the
+system must never claim something false about X" is the right one.** The first is
+impossible here and the second is achievable, and conflating them produces tests that
+demand behaviour a correct implementation cannot have.
+
+(Also in this run, a two-minute one: an expected string written as
+`std::string("P:k3=v\0 3", 10)` when the literal is 9 bytes. Miscounting the length of a
+string literal containing an embedded NUL is a small tax for supporting arbitrary bytes in
+keys — and a good argument for the harness printing byte counts on a mismatch, which it
+now effectively does via the length in the failure message.)
+
+---

@@ -55,6 +55,8 @@ add_library(lsmeng STATIC
   src/crc32c.cc
   src/stats.cc
   src/memtable.cc
+  src/write_batch.cc
+  src/wal.cc
 )
 target_link_libraries(lsmeng PUBLIC pthread)
 
@@ -83,6 +85,7 @@ lsmeng_test(test_stats)
 lsmeng_test(test_bloom)
 lsmeng_test(test_skiplist)
 lsmeng_test(test_memtable)
+lsmeng_test(test_wal)
 
 # ---------------------------------------------------------------------------
 # Tools. SPEC 4.3.
