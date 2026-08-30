@@ -223,6 +223,137 @@ LSMENG_MODEL_OPS=20000 ./scripts/dev.sh ./build-none/test_db_read
 All five E-2 resurrection scenarios have their own hand-built test as well, because three of
 them (E-2a, E-2d, E-2e) correspond to bugs SPEC v1 actually had.
 
+## T11 — the benchmarks
+
+All runs: Apple Silicon (arm64) → Docker Desktop → LinuxKit VM → Ubuntu 24.04, 8 CPUs,
+database on `/data` (container-local). **Never the bind mount** — B5 measured its `fsync`
+at 55 µs against `/data`'s 339 µs, which is the wrong direction for a durability barrier
+and suggests it is not really flushing.
+
+### R5 — write throughput, and what "high" is measured against (§2.1)
+
+**B-null, the floor.** Raw `write()` of the same bytes to a flat file, no index, no
+structure:
+
+```bash
+./build-none/bench --bench baseline --num 20000 --sync true --db /data/b
+```
+| | ops/s |
+|---|---|
+| raw append, no fsync | 5,351,606 |
+| **raw append + fsync** | **3,043** |
+
+**B-selfscale — the engine, `sync=true`, every writer asking for durability:**
+
+```bash
+for t in 1 2 4 8 16; do ./build-none/bench --bench fillrandom --threads $t --num 40000 --sync true --db /data/ws; done
+```
+
+| threads | ops/s | `wal-syncs` | **writes per fsync** | p50 | p99 | p99.9 |
+|---|---|---|---|---|---|---|
+| 1 | 3,031 | 40,000 | 1.00 | 319 µs | 648 µs | 972 µs |
+| 2 | 4,382 | 26,682 | 1.50 | 363 | 998 | 1,412 |
+| 4 | 7,146 | 16,001 | 2.50 | 568 | 1,032 | 1,636 |
+| 8 | 12,233 | 8,915 | 4.49 | 662 | 1,124 | 1,804 |
+| **16** | **20,950** | **4,718** | **8.48** | 758 | 1,220 | 2,216 |
+
+`MEASURED`. **This is R5.** Two things it says, and the second is the more honest one:
+
+1. **6.9× throughput from 1 to 16 threads while the fsync count FALLS 8.5×.** That is group
+   commit doing exactly what it claims: one `fsync` committing many writers' data.
+2. **At 1 thread the engine sustains 3,031 ops/s against a raw-append-plus-fsync floor of
+   3,043 — 99.6% of the floor, while maintaining a full sorted index.** The LSM write path
+   costs essentially nothing over the durability barrier itself. That is the number worth
+   quoting, and it is a *ratio to a baseline*, not a bare figure.
+
+**The honest counterpoint, `sync=false`:**
+
+| threads | 1 | 2 | 4 | 8 |
+|---|---|---|---|---|
+| ops/s | 1,046,646 | 716,586 | 383,234 | 169,155 |
+
+`MEASURED`. Throughput **falls** with thread count. With no `fsync` there is nothing to
+amortise, so the leader/follower serialisation is pure overhead — every write still funnels
+through one leader. **Group commit is a mechanism for amortising an expensive operation,
+and where that operation is absent it is a cost.** Saying so unprompted is worth more than
+the good number above it.
+
+### R6 — Bloom filters, end to end
+
+```bash
+for b in 0 4 10 16; do ./build-none/bench --bench readmissing --threads 4 --num 400000 --bloom_bits $b --db /data/rb2; done
+```
+
+200,000 keys loaded (even), 400,000 lookups for **in-range absent keys** (odd):
+
+| bits/key | ops/s | **data blocks read** | filter rejections | **implied FPR** |
+|---|---|---|---|---|
+| **0 (off)** | 1,130,406 | **261,128** | 0 | — |
+| 4 | 2,520,914 | 43,047 | 337,772 | 15.6% |
+| **10 (default)** | **2,718,876** | **6,819** | 396,694 | **0.83%** |
+| 16 | 2,758,019 | 5,629 | 399,847 | 0.04% |
+
+`MEASURED`. **2.4× throughput and a 38× reduction in data blocks read** at the default. The
+implied end-to-end FPRs (15.6% / 0.83% / 0.04%) match T2's unit-test measurements
+(15.6% / 0.836% / 0.04%) almost exactly — two independent measurements of the same
+quantity agreeing is what turns a number into evidence.
+
+Diminishing returns are visible: 10→16 bits/key costs 60% more filter memory to remove a
+further 0.8% of block reads.
+
+### R12/R13 — cache sharding
+
+```bash
+for s in 1 4 16; do ./build-none/bench --bench readhot --threads 8 --num 200000 --cache_shards $s --db /data/rh; done
+```
+
+| shards | ops/s | p50 | **p90** | p99 | p99.9 |
+|---|---|---|---|---|---|
+| **1** | 708,820 | 2 µs | **29 µs** | 131 µs | 240 µs |
+| 4 | 1,002,074 | 2 | 13 | 107 | 230 |
+| **16** | **1,117,832** | 2 | **10 µs** | 99 µs | 295 |
+
+`MEASURED`, 8 threads, ~98% cache hit rate. **1.58× throughput and a 2.9× improvement at
+p90** from sharding alone. The mechanism is that an LRU is *mutated on every hit* — the
+entry moves to the list head — so even a pure-read workload serialises on one mutex.
+
+Note p99.9 does **not** improve (240 → 295 µs). The deep tail is not the cache lock; T12
+goes looking for what it is.
+
+### R8/R13 — mixed workload, compaction live throughout
+
+```bash
+./build-none/bench --bench mixed --threads 2 --reads 8 --num 200000 --seconds 15 --db /data/mx
+```
+
+```
+11,901,932 ops in 15.00s -> 793,388 ops/s
+p50=2  p90=22  p99=191  p99.9=449  max=128,721 (us)
+42 compactions, 911,742,473 bytes compacted, 0 stalls
+```
+
+`MEASURED`. 2 writers + 8 readers with 42 compactions running underneath. The 128 ms
+maximum against a 449 µs p99.9 is the compaction tail — that gap is precisely what R13 is
+about, and it is why a mean (12.4 µs) would be worthless here.
+
+### The open-loop protocol (§10.1), demonstrated
+
+Calibrated `M = 7,178 ops/s` closed-loop at 4 threads, `sync=true`, then targeted fractions
+of it:
+
+| target | achieved | verdict | p50 | p99 | p99.9 |
+|---|---|---|---|---|---|
+| 3,589 (0.50 M) | 3,590 | valid (100.0%) | 1,052 µs | 2,352 | 4,448 |
+| 5,384 (0.75 M) | 5,389 | valid (100.1%) | 982 | 2,088 | 3,104 |
+| 6,460 (0.90 M) | 6,460 | valid (100.0%) | 1,044 | 4,832 | 6,768 |
+| **12,000 (1.67 M)** | 7,111 | **INVALID — DIVERGED (59% of target)** | *refused* | *refused* | *refused* |
+
+`MEASURED`. The last row is the point. Above saturation the backlog grows without bound and
+latency measured from the *intended* start time becomes a function of run **duration** — an
+earlier build of this harness happily reported `p99.9 = 864 ms` for that run, which is not a
+property of the engine at all. The harness now refuses to print percentiles for a diverging
+run.
+
 ## T0 — deferred to their tasks
 
 | Number | Status | Task |

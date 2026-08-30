@@ -105,6 +105,7 @@ lsmeng_test(test_lock_exclusion)
 lsmeng_test(test_db_write)
 lsmeng_test(test_db_read)
 lsmeng_test(test_compaction)
+lsmeng_test(test_histogram)
 
 # ---------------------------------------------------------------------------
 # Tools. SPEC 4.3.
@@ -114,3 +115,6 @@ target_link_libraries(env_facts PRIVATE lsmeng)
 
 add_executable(sst_dump tools/sst_dump.cc)
 target_link_libraries(sst_dump PRIVATE lsmeng)
+
+add_executable(bench bench/bench.cc)
+target_link_libraries(bench PRIVATE lsmeng)

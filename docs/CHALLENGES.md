@@ -1105,3 +1105,47 @@ Adding `lsmeng.live-entries` for this also turned out to be the right instrument
 it is what SPEC E-33's own defence describes, and no counter I had exposed could express it.
 
 ---
+
+## B20 🔬 The Bloom benchmark measured the wrong filter, and `bloom-checked=0` was the only sign
+
+**Symptom.** The `bloom_sweep` workload showed **identical** throughput and identical
+`blocks-read` at 0, 4, 10 and 16 bits per key. The counters said why:
+
+```
+bloom_bits=0   blocks-read=5559  bloom-checked=0  bloom-rejected=0
+bloom_bits=10  blocks-read=5559  bloom-checked=0  bloom-rejected=0
+```
+
+**`bloom-checked=0`.** With filters fully enabled, the filter was never consulted once.
+
+**Root cause.** The benchmark probed for keys named `absent123` against a database of keys
+named `key0000000000000001`. `"absent…" < "key…"` bytewise, so every probe fell **below
+every file's smallest key**, and SPEC §3.7's per-file **range check** — which runs *before*
+the Bloom filter precisely because it costs no I/O at all — rejected all of them. The
+benchmark was measuring the range filter and attributing the result to Bloom.
+
+Two things made this hard to see. The number *looked* plausible — filters "not helping" on
+absent keys is a result someone could believe. And T5's unit test had measured the Bloom
+effect correctly (0.0078 blocks per lookup), because it calls `SstReader::Get` directly and
+therefore bypasses the `Version`-level range check entirely. **The two layers disagreed and
+each looked right on its own.**
+
+**Fix.** Preload only even-numbered keys and probe odd ones, so every probe is absent *and
+in range*. The result went from "no effect" to **2.4× throughput and a 38× reduction in
+data blocks read**, with implied FPRs (15.6% / 0.83% / 0.04%) matching T2's unit-test
+figures almost exactly.
+
+**Generalizes to.** Three things.
+1. **A workload has to reach the code it claims to measure.** "Absent key" is not one thing:
+   absent-and-in-range exercises the filter, absent-and-out-of-range exercises the range
+   check, and only the first is what R6 is about.
+2. **Instrument the mechanism, not just the outcome.** `blocks-read` alone said "no
+   difference"; `bloom-checked` said *why*, and without that counter I would have concluded
+   the filter was useless. This is the argument for SPEC §4.1's counters being part of the
+   contract rather than a debugging nicety.
+3. **When a unit test and an end-to-end benchmark disagree, the benchmark is usually
+   measuring something else.** The unit test bypassed a layer; the benchmark hit that layer
+   and stopped there. Neither was broken — they were answering different questions, and only
+   one of them was the question I had asked.
+
+---
