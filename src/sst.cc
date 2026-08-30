@@ -196,7 +196,8 @@ Status SstReader::ReadBlock(const BlockHandle& handle, bool verify, std::string*
 }
 
 Status SstReader::Open(const Options& options, std::unique_ptr<RandomAccessFile> file,
-                       uint64_t file_size, Stats* stats, std::unique_ptr<SstReader>* out) {
+                       uint64_t file_size, Stats* stats, std::unique_ptr<SstReader>* out,
+                       Cache* block_cache, uint64_t file_number) {
   if (file_size < kFooterSize)
     return Status::Corruption("file is too short to be an SST");
 
@@ -205,7 +206,7 @@ Status SstReader::Open(const Options& options, std::unique_ptr<RandomAccessFile>
   Status s = file->Read(file_size - kFooterSize, kFooterSize, &footer_input, space);
   if (!s.ok()) return s;
 
-  std::unique_ptr<SstReader> r(new SstReader(options, std::move(file), stats));
+  std::unique_ptr<SstReader> r(new SstReader(options, std::move(file), stats, block_cache, file_number));
   s = r->footer_.DecodeFrom(footer_input);
   if (!s.ok()) return s;
 
@@ -231,44 +232,84 @@ Status SstReader::Open(const Options& options, std::unique_ptr<RandomAccessFile>
   return Status::OK();
 }
 
+namespace {
+// What a cached block owns: the decoded Block and the bytes it points into. They are freed
+// together, by the cache, when the last reference goes away.
+struct CachedBlock {
+  std::string contents;
+  std::unique_ptr<Block> block;
+};
+void DeleteCachedBlock(void* v) { delete static_cast<CachedBlock*>(v); }
+
+// Wraps a block iterator so that releasing the cache handle (or deleting an uncached
+// block) happens exactly when the iterator dies. Getting this wrong is a use-after-free
+// that only appears under eviction pressure.
+class BlockOwningIterator final : public Iterator {
+ public:
+  BlockOwningIterator(Iterator* inner, Cache* cache, Cache::Handle* handle,
+                      CachedBlock* owned)
+      : inner_(inner), cache_(cache), handle_(handle), owned_(owned) {}
+  ~BlockOwningIterator() override {
+    delete inner_;
+    if (cache_ && handle_) cache_->Release(handle_);
+    delete owned_;
+  }
+  bool Valid() const override { return inner_->Valid(); }
+  void SeekToFirst() override { inner_->SeekToFirst(); }
+  void SeekToLast() override { inner_->SeekToLast(); }
+  void Seek(const Slice& t) override { inner_->Seek(t); }
+  void Next() override { inner_->Next(); }
+  void Prev() override { inner_->Prev(); }
+  Slice key() const override { return inner_->key(); }
+  Slice value() const override { return inner_->value(); }
+  Status status() const override { return inner_->status(); }
+
+ private:
+  Iterator* inner_;
+  Cache* cache_;
+  Cache::Handle* handle_;
+  CachedBlock* owned_;   // non-null only when the block is NOT in the cache
+};
+}  // namespace
+
 Iterator* SstReader::BlockIterator(const Slice& index_value) const {
   BlockHandle handle;
   Slice input = index_value;
   Status s = handle.DecodeFrom(&input);
   if (!s.ok()) return NewErrorIterator(s);
 
-  // No block cache yet -- T6 adds it. Reading into a heap buffer owned by the iterator
-  // keeps the ownership story identical once the cache lands.
-  auto* contents = new std::string();
-  s = ReadBlock(handle, options_.paranoid_checks, contents);
-  if (!s.ok()) { delete contents; return NewErrorIterator(s); }
-  if (stats_) stats_->Add(kBlocksRead, 1);
+  if (block_cache_ != nullptr) {
+    const std::string key = Cache::BlockKey(file_number_, handle.offset);
+    if (Cache::Handle* h = block_cache_->Lookup(Slice(key))) {
+      if (stats_) stats_->Add(kCacheHits, 1);
+      auto* cb = static_cast<CachedBlock*>(block_cache_->Value(h));
+      return new BlockOwningIterator(cb->block->NewIterator(), block_cache_, h, nullptr);
+    }
+    if (stats_) stats_->Add(kCacheMisses, 1);
+  }
 
-  auto* block = new Block(Slice(*contents));
-  Iterator* it = block->NewIterator();
-  // Ownership: the iterator outlives neither, so both are deleted with it. A cleanup hook
-  // is added in T6 when the cache takes over; for now the block and buffer are leaked into
-  // the iterator's lifetime deliberately and freed by the wrapper below.
-  struct Owning final : Iterator {
-    Iterator* inner;
-    Block* blk;
-    std::string* buf;
-    ~Owning() override { delete inner; delete blk; delete buf; }
-    bool Valid() const override { return inner->Valid(); }
-    void SeekToFirst() override { inner->SeekToFirst(); }
-    void SeekToLast() override { inner->SeekToLast(); }
-    void Seek(const Slice& t) override { inner->Seek(t); }
-    void Next() override { inner->Next(); }
-    void Prev() override { inner->Prev(); }
-    Slice key() const override { return inner->key(); }
-    Slice value() const override { return inner->value(); }
-    Status status() const override { return inner->status(); }
-  };
-  auto* own = new Owning();
-  own->inner = it;
-  own->blk = block;
-  own->buf = contents;
-  return own;
+  // A MISS. The read happens with NO cache lock held (SPEC 3.10, L2). Two threads missing
+  // on the same block will both read it and both insert -- the accepted stampede of E-12.
+  // The alternative, holding a shard mutex across a disk read, would serialise every
+  // reader behind the slowest I/O, which is exactly the contention this design exists to
+  // avoid.
+  auto cb = std::make_unique<CachedBlock>();
+  s = ReadBlock(handle, options_.paranoid_checks, &cb->contents);
+  if (!s.ok()) return NewErrorIterator(s);
+  if (stats_) stats_->Add(kBlocksRead, 1);
+  cb->block.reset(new Block(Slice(cb->contents)));
+  if (!cb->block->ok()) return NewErrorIterator(Status::Corruption("malformed data block"));
+
+  if (block_cache_ != nullptr) {
+    const std::string key = Cache::BlockKey(file_number_, handle.offset);
+    CachedBlock* raw = cb.release();
+    Cache::Handle* h = block_cache_->Insert(Slice(key), raw,
+                                            raw->contents.size() + sizeof(CachedBlock),
+                                            &DeleteCachedBlock);
+    return new BlockOwningIterator(raw->block->NewIterator(), block_cache_, h, nullptr);
+  }
+  CachedBlock* raw = cb.release();
+  return new BlockOwningIterator(raw->block->NewIterator(), nullptr, nullptr, raw);
 }
 
 uint32_t SstReader::NumDataBlocks() const {

@@ -134,6 +134,21 @@ block read; with them on, 99.2% of those reads never happen.
 | 5,000 entries, 40 B values, `block_size=512` | 326,801 bytes across 556 data blocks |
 | Prefix compression + index + filter + trailers | see `sst_dump`'s `file/user ratio` |
 
+## T6 — block cache and table cache
+
+```bash
+./scripts/dev.sh ./build-none/test_table_cache   # MEASURED lines
+```
+
+| Fact | Value | Note |
+|---|---|---|
+| 100 identical point lookups | **1 block read, 99 cache hits** | `MEASURED`. The block cache does what it claims |
+| `max_open_files = 4`, 50 files touched | **3 readers resident** | `MEASURED`. E-26: fds are bounded |
+| `max_open_files = 1000`, `filter_memory_bytes = 32 KiB`, 30 large files | **12 readers, 30,396 bytes charged** | `MEASURED`. **E-34: the BYTE limit bound it, not the count.** With a count-only limit all 30 readers would have stayed resident and pinned their filters — which is exactly the hole SPEC v1 had |
+
+Sharding (1 vs 4 vs 16) is built and correct; **the contention delta it exists to produce
+is T12's measurement**, not T6's.
+
 ## T0 — deferred to their tasks
 
 | Number | Status | Task |

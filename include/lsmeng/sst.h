@@ -5,6 +5,7 @@
 
 #include "lsmeng/block.h"
 #include "lsmeng/bloom.h"
+#include "lsmeng/cache.h"
 #include "lsmeng/env.h"
 #include "lsmeng/iterator.h"
 #include "lsmeng/options.h"
@@ -107,8 +108,12 @@ class SstReader {
   // held for this reader's lifetime -- not fetched through the block cache, because a
   // whole-file filter is far larger than a block and would evict the data blocks it exists
   // to protect (SPEC 3.5, E-34).
+  // `block_cache` and `file_number` may be null/0, in which case every block read goes to
+  // disk. That is the configuration the T12 experiment turns off to measure what the cache
+  // is worth.
   static Status Open(const Options& options, std::unique_ptr<RandomAccessFile> file,
-                     uint64_t file_size, Stats* stats, std::unique_ptr<SstReader>* out);
+                     uint64_t file_size, Stats* stats, std::unique_ptr<SstReader>* out,
+                     Cache* block_cache = nullptr, uint64_t file_number = 0);
 
   // Returns NotFound if the key is absent. `stats` records bloom-checked/bloom-rejected
   // and blocks-read, which is how R6's "measured reduction in data blocks read" is
@@ -124,8 +129,9 @@ class SstReader {
   uint32_t NumDataBlocks() const;
 
  private:
-  SstReader(const Options& o, std::unique_ptr<RandomAccessFile> f, Stats* s)
-      : options_(o), file_(std::move(f)), stats_(s) {}
+  SstReader(const Options& o, std::unique_ptr<RandomAccessFile> f, Stats* s, Cache* c,
+            uint64_t n)
+      : options_(o), file_(std::move(f)), stats_(s), block_cache_(c), file_number_(n) {}
 
   Status ReadBlock(const BlockHandle& handle, bool verify, std::string* out) const;
   Iterator* BlockIterator(const Slice& index_value) const;
@@ -133,6 +139,8 @@ class SstReader {
   const Options options_;
   std::unique_ptr<RandomAccessFile> file_;
   Stats* stats_;
+  Cache* block_cache_ = nullptr;
+  uint64_t file_number_ = 0;
   Footer footer_;
   std::string index_data_;
   std::string filter_data_;
