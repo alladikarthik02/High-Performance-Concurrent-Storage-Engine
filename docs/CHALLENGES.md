@@ -520,3 +520,46 @@ saying why so it does not get "simplified" back later.
    your head, that is where the bug goes.
 
 ---
+
+## B8 🐛 Sharding a counter is correct for a sum and wrong for a maximum
+
+**Symptom.** `test_stats` failed on its first run:
+
+```
+FAIL test_stats.cc:31: CHECK_EQ(s.Get(kMaxStallMs), 800u) -- lhs=3600 rhs=800
+```
+
+Eight threads each recorded a high-water mark of 0, 100, 200 … 800 ms. The true maximum is
+800. The counter reported **3600** — which is 0+100+…+800.
+
+**Root cause.** I sharded the counters sixteen ways to avoid false sharing (SPEC E-24),
+which was right, and then wrote a single `Get()` that **sums the shards**, which was right
+for every counter except the one it was wrong for. `Add` + sum is correct. `Max` + sum is
+not the maximum; it is the sum of per-shard maxima, and it grows with thread count.
+
+**Why this one is worth more than the two lines it took to fix.** The counter in question
+is `lsmeng.max-stall-ms` — the write-stall high-water mark, which is **direct evidence for
+R13, the tail-latency claim.** The reported number was inflated 4.5× at eight threads, and
+it would have inflated *further* with more threads, so a benchmark showing "p99.9 improved
+when we reduced thread count" would have been partly an artefact of the measuring
+instrument. A wrong number in a benchmark is worse than a missing one: it gets written down
+and defended.
+
+It is also silent by construction. Nothing crashes, nothing corrupts, and the value is
+plausible — 3600 ms is a believable stall. Only a test that knew the right answer in
+advance could catch it.
+
+**Fix.** How a counter is reduced is now **part of its declaration**, not a property of the
+reader: a `CounterKind` table (`kSum` / `kMax` / `kGauge`) sits beside the names, with a
+`static_assert` that the tables have the same length, and `Get()` dispatches on it. Gauges
+write to shard 0 only, so summing still yields the right answer with nothing to reconcile.
+
+**Generalizes to.** **A performance transformation is only transparent for the operations
+it distributes over.** Sharding distributes over `+`. It does not distribute over `max`,
+and it would not distribute over "last value wins" or over a percentile either — a sharded
+histogram must be merged bucket-wise, not concatenated. The general form of the mistake is
+optimising a *representation* while leaving the *reduction* implicit; the fix, both here
+and generally, is to make the reduction explicit and let the compiler check that every new
+counter declares one.
+
+---

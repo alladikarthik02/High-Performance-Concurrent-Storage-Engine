@@ -67,12 +67,40 @@ phrase is backed by a tool that actually produced output, not one that printed
 | Cache shard balance, 16 shards | every shard within ±10% of even | `MEASURED`. A skewed map would make the R12 sharding experiment measure nothing |
 | **Arena overhead vs user bytes** | **1.48×** | `MEASURED` (modelled node). **SPEC §3.4 assumed 2–3×; the assumption was pessimistic and is now corrected.** 3,422,736 arena bytes for 20,000 records of 116 user bytes. Refined against real skip-list nodes in T3 |
 
+## T1b / T2 — stats and the Bloom filter
+
+```bash
+./scripts/dev.sh ./build-none/test_bloom     # MEASURED lines
+```
+
+| bits/key | k | **measured FPR** | theory | bytes/key |
+|---|---|---|---|---|
+| 4 | 2 | **0.15560** | 0.16000 | 0.50 |
+| **10 (default)** | **6** | **0.00836** | **0.00820** | **1.25** |
+| 16 | 11 | **0.00040** | 0.00048 | 2.00 |
+
+`MEASURED`, 20,000 keys inserted, 100,000 absent-key probes each. **R6 is earned by this
+table.** The m=10 row is within 2% of theory, which is what says the double-hashing
+scheme (one 64-bit hash split into two 32-bit halves, `h2` forced odd) behaves like k
+independent hashes at these parameters — the thing SPEC §3.6 asserted and could not prove.
+
+**One honest discrepancy.** SPEC §3.6 said `k = round(m·ln2) = 7`; the code truncates, so
+k = 6. Measured 0.00836 sits right on k=6 theory (0.00844) rather than k=7 theory
+(0.00819). Truncation is kept deliberately: **k=7 buys a 3% better FPR for 17% more probes
+per lookup**, and the probes are on the read hot path. The spec is corrected to say
+`floor`, rather than the code being bent to match a number nobody had measured.
+
+Filter size is **1.25 bytes/key**, flat from 1k to 100k keys — which is the input to E-34:
+a deep-tier file holding ~10⁶ keys carries a **~1.25 MiB** resident filter, 15% of the
+default 8 MiB block cache for a single file. That is why the table cache is bounded in
+bytes and not only by file count.
+
 ## T0 — deferred to their tasks
 
 | Number | Status | Task |
 |---|---|---|
 | Group commit: `wal-syncs` ≪ `writes` at 8 threads | `ASSUMED` | T8 |
 | Memtable arena bytes vs real skip-list nodes | measured at 1.48× for a modelled node in T1; refine | T3 |
-| Bloom FPR vs theory (0.0082 at m=10, k=7) | `ASSUMED` | T2 |
+
 | Cache sharding removes contention | `ASSUMED` | T12 |
 | Tier count / read amp under overwrite | `ASSUMED` | T11 |

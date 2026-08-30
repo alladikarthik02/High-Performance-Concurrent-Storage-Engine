@@ -531,8 +531,15 @@ block. A "no" is certain; a "yes" is probabilistic. A false positive costs one w
 read — the situation we were in without a filter. A false *negative* would return wrong
 data, and cannot happen. That asymmetry is the whole safety argument.
 
-**Parameters.** `bits_per_key = 10` (configurable; 0 disables). `k = round(m·ln 2) = 7`,
-clamped to `[1, 30]`. Theoretical FPR at m=10, k=7: `(1 − e^(−7/10))⁷ ≈ 0.0082`.
+**Parameters.** `bits_per_key = 10` (configurable; 0 disables). **`k = floor(m·ln 2) = 6`**,
+clamped to `[1, 30]`. Theoretical FPR at m=10: 0.0084 for k=6, 0.0082 for k=7.
+
+*Why floor and not round* (decided by measurement in T2, not by taste): k=7 buys a 3%
+better false-positive rate for **17% more probes per lookup**, and those probes sit on the
+read hot path. T2 measured 0.00836 at k=6 — within 2% of that row's theory. The clamp to
+`[1, 30]` is load-bearing at the bottom: `bits_per_key = 1` would give k = 0 unclamped, and
+a filter that probes zero bits answers "not present" for **everything** — a false-negative
+machine, the one failure this design says is impossible.
 
 **Hashing.** One 64-bit hash of the *user key* (not the internal key — the filter is
 queried with a user key and must not depend on a sequence number), then

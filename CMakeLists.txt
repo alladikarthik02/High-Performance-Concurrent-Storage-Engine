@@ -53,6 +53,7 @@ include_directories(${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR})
 add_library(lsmeng STATIC
   src/env_posix.cc
   src/crc32c.cc
+  src/stats.cc
 )
 target_link_libraries(lsmeng PUBLIC pthread)
 
@@ -77,6 +78,8 @@ lsmeng_test(test_crc32c)
 lsmeng_test(test_dbformat)
 lsmeng_test(test_arena)
 lsmeng_test(test_hash)
+lsmeng_test(test_stats)
+lsmeng_test(test_bloom)
 
 # ---------------------------------------------------------------------------
 # Tools. SPEC 4.3.
