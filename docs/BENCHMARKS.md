@@ -51,12 +51,28 @@ phrase is backed by a tool that actually produced output, not one that printed
 
 ---
 
+## T1 — primitives
+
+```bash
+./scripts/dev.sh ./build-none/test_crc32c    # implementation line
+./scripts/dev.sh ./build-none/test_arena     # MEASURED line
+./scripts/dev.sh ./build-none/test_hash      # MEASURED line
+```
+
+| Fact | Value | Note |
+|---|---|---|
+| CRC32C path selected at runtime | **`aarch64 __crc32c (hardware)`** | `MEASURED`. `HWCAP_CRC32` is present, so the ARMv8 instruction is live. Verified against the RFC 3720 vectors **and** differentially against the portable table over random inputs — "the fast and slow paths disagree" would be silent corruption, not a perf bug |
+| Hash collisions, 200k structured keys | **0** | `MEASURED`. Keys of the form `user:<n>:name` — long shared prefixes, which is the shape that breaks weak hashes |
+| Hash bit distribution | every one of 64 bits set 45–55% of the time | `MEASURED`. The Bloom filter splits this into two 32-bit halves, so a poorly-mixed high half would quietly degrade the FPR |
+| Cache shard balance, 16 shards | every shard within ±10% of even | `MEASURED`. A skewed map would make the R12 sharding experiment measure nothing |
+| **Arena overhead vs user bytes** | **1.48×** | `MEASURED` (modelled node). **SPEC §3.4 assumed 2–3×; the assumption was pessimistic and is now corrected.** 3,422,736 arena bytes for 20,000 records of 116 user bytes. Refined against real skip-list nodes in T3 |
+
 ## T0 — deferred to their tasks
 
 | Number | Status | Task |
 |---|---|---|
 | Group commit: `wal-syncs` ≪ `writes` at 8 threads | `ASSUMED` | T8 |
-| Memtable arena bytes vs user bytes (~2–3×) | `ASSUMED` | T3 |
+| Memtable arena bytes vs real skip-list nodes | measured at 1.48× for a modelled node in T1; refine | T3 |
 | Bloom FPR vs theory (0.0082 at m=10, k=7) | `ASSUMED` | T2 |
 | Cache sharding removes contention | `ASSUMED` | T12 |
 | Tier count / read amp under overwrite | `ASSUMED` | T11 |

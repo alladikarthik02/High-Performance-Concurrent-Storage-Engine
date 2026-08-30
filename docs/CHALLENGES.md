@@ -467,3 +467,56 @@ able to say *why* the counters are missing, unprompted, is worth more in an inte
 having had them.
 
 ---
+
+## B7 🐛 UBSan caught an unaligned load in the hardware CRC path — and the test written to catch alignment bugs did not
+
+**Symptom.** Green in `none` and `thread`. In `address`:
+
+```
+src/crc32c.cc:58:49: runtime error: load of misaligned address 0x506000000081
+  for type 'const uint64_t', which requires 8 byte alignment
+  #2 in extend_is_associative_over_split_points  test_crc32c.cc:67
+```
+
+**Root cause.** The aarch64 fast path did
+`__builtin_aarch64_crc32cx(c, *reinterpret_cast<const uint64_t*>(data))`. Dereferencing a
+`uint64_t*` that is not 8-byte aligned is **undefined behaviour**, whatever the hardware
+tolerates. ARMv8 and x86-64 both execute the load happily, which is why it passed in two
+of three configurations — but the standard permits the compiler to assume the pointer is
+aligned, and at higher optimisation levels it can and does vectorise on that assumption.
+
+I had already used `memcpy` for exactly this reason in `Hash64` and in the portable CRC
+path, and then reached for a cast in the two functions written last. The correct form
+costs nothing: `memcpy` of 8 bytes compiles to the same single `ldr`.
+
+**The part worth keeping: which test found it.**
+
+I wrote `unaligned_starts_produce_the_same_value` *specifically* to catch alignment bugs.
+**It passed.** The bug was found by `extend_is_associative_over_split_points`, which is
+about something else entirely.
+
+Why: the alignment test compares the hardware result against the portable result, and both
+were *correct*. UB that produces the right answer is invisible to a test that checks
+answers. The associativity test happened to call `Extend` with a pointer at every offset
+into a string literal — including offset 1 — and UBSan flagged the load itself, regardless
+of the value it produced.
+
+So the test that found it did not know it was looking, and the test that was looking could
+not see it. **The sanitizer found the bug; the test only supplied the input.** That is the
+actual division of labour, and it is why the three-configuration gate is not optional
+ceremony: `none` and `thread` were both green, and shipping on either would have shipped
+UB.
+
+**Fix.** `std::memcpy` into a local in both the aarch64 and x86-64 paths, with a comment
+saying why so it does not get "simplified" back later.
+
+**Generalizes to.** Two things.
+1. **A test that asserts on values cannot detect undefined behaviour that yields the right
+   value.** Only an instrumented build can. Writing a test *about* alignment gives no
+   coverage of alignment; running the suite under UBSan does.
+2. **Consistency within a file is not consistency across a file.** The safe idiom was
+   already present twice in this codebase and I still wrote the unsafe one, because the
+   hardware paths *felt* like a different kind of code. When a rule has an exception in
+   your head, that is where the bug goes.
+
+---
