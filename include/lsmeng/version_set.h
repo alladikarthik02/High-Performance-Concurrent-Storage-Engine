@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -10,6 +11,7 @@
 #include "lsmeng/env.h"
 #include "lsmeng/options.h"
 #include "lsmeng/table_cache.h"
+#include "lsmeng/tracked_mutex.h"
 #include "lsmeng/version_edit.h"
 #include "lsmeng/wal.h"
 
@@ -85,7 +87,14 @@ class VersionSet {
   // (SPEC 3.9 -- data file -> fsync -> manifest edit -> fsync -> in-memory install).
   // Never the reverse: recording a file before it is durable produces a manifest that
   // references a file which does not exist, which is unrecoverable rather than untidy.
-  Status LogAndApply(VersionEdit* edit);
+  //
+  // `mu`, when non-null, is db_mutex_ HELD BY THE CALLER. It is RELEASED across the append
+  // and the fsync and re-acquired before the install -- because S13 forbids holding it
+  // across I/O, and a manifest fsync is exactly the kind of multi-millisecond stall that
+  // would block every queued writer and every Get. Releasing it is safe only because
+  // exactly one thread is ever inside this function (SPEC 3.8.4's single background
+  // thread), which is asserted rather than assumed (S23). See CHALLENGES B14.
+  Status LogAndApply(VersionEdit* edit, TrackedMutex* mu);
 
   Version* current() const { return current_; }
 
@@ -133,6 +142,10 @@ class VersionSet {
 
   Version dummy_versions_{this};   // head of a circular doubly-linked list of live versions
   Version* current_ = nullptr;
+
+  // S23: exactly one thread appends to the MANIFEST, so on-disk record order equals
+  // in-memory install order by construction. Asserted, not assumed.
+  std::atomic<bool> appending_{false};
 };
 
 }  // namespace lsmeng

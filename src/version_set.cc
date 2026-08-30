@@ -222,7 +222,7 @@ Status VersionSet::CreateNew() {
   return Status::OK();
 }
 
-Status VersionSet::LogAndApply(VersionEdit* edit) {
+Status VersionSet::LogAndApply(VersionEdit* edit, TrackedMutex* mu) {
   // Keep the counter ahead of anything this edit records, so the manifest is always
   // self-consistent even if a caller built a FileMetaData without allocating through
   // NewFileNumber(). Recovery double-checks the same property (B12); doing it on both
@@ -248,8 +248,24 @@ Status VersionSet::LogAndApply(VersionEdit* edit) {
   // always equals in-memory install order (S23).
   std::string record;
   edit->EncodeTo(&record);
+
+  // S23. If a second thread ever reaches here concurrently, the two appends interleave
+  // mid-record, the CRC fails at the splice point, and the torn-tail rule then silently
+  // discards BOTH edits and every later one (E-38). Assert rather than hope.
+  const bool was_appending = appending_.exchange(true, std::memory_order_acq_rel);
+  LSMENG_ASSERT(!was_appending,
+                "two threads appending to the MANIFEST -- SPEC 3.8.4 says there is one "
+                "background thread (S23, E-38)");
+
+  // S13: db_mutex_ is released across the append and the fsync. A manifest fsync is
+  // milliseconds; holding the lock across it would block every queued writer and every
+  // Get, which is precisely the p99.9 damage R13 exists to remove.
+  if (mu) mu->unlock();
   Status s = manifest_log_->AddRecord(Slice(record));
   if (s.ok()) s = manifest_log_->Sync();
+  if (mu) mu->lock();
+  appending_.store(false, std::memory_order_release);
+
   if (!s.ok()) { delete v; return s; }
 
   AppendVersion(v);
@@ -267,6 +283,15 @@ Status VersionSet::Recover() {
   current.pop_back();
 
   const std::string manifest = dbname_ + "/" + current;
+  // The number of the manifest CURRENT actually names. This is NOT next_file_number:
+  // conflating them made RemoveObsoleteFiles delete the LIVE manifest as soon as the file
+  // counter had moved past it, leaving CURRENT pointing at nothing. See CHALLENGES B14.
+  uint64_t current_manifest_number = 0;
+  {
+    std::string kind;
+    if (!ParseFileName(current, &current_manifest_number, &kind) || kind != "MANIFEST")
+      return Status::Corruption("CURRENT does not name a manifest: '" + current + "'");
+  }
   std::unique_ptr<WalReader> reader;
   s = WalReader::Open(env_, manifest, &reader);
   if (!s.ok()) {
@@ -341,8 +366,9 @@ Status VersionSet::Recover() {
   builder.SaveTo(v);
   AppendVersion(v);
 
-  manifest_file_number_ = next_file;
+  manifest_file_number_ = current_manifest_number;
   next_file_number_ = std::max(next_file + 1, highest_seen + 1);
+  MarkFileNumberUsed(current_manifest_number);
   last_sequence_ = have_last_seq ? last_seq : 0;
   log_number_ = have_log ? log_number : 0;
   prev_log_number_ = have_prev_log ? prev_log_number : 0;

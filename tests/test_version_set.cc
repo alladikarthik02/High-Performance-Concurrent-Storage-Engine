@@ -118,7 +118,7 @@ TEST(create_then_recover_reproduces_the_file_set) {
   e.AddFile(1, MakeFile(12, "a", "z", 5000));
   f.vset->MarkFileNumberUsed(12);
   f.vset->SetLastSequence(777);
-  REQUIRE_OK(f.vset->LogAndApply(&e));
+  REQUIRE_OK(f.vset->LogAndApply(&e, nullptr));
 
   CHECK_EQ(f.vset->current()->NumFilesAtTier(0), 2);
   CHECK_EQ(f.vset->current()->NumFilesAtTier(1), 1);
@@ -140,7 +140,7 @@ TEST(last_sequence_survives_reopen_and_never_restarts_at_zero) {
   f.vset->SetLastSequence(123456);
   VersionEdit e;
   e.AddFile(0, MakeFile(5, "a", "b"));
-  REQUIRE_OK(f.vset->LogAndApply(&e));
+  REQUIRE_OK(f.vset->LogAndApply(&e, nullptr));
 
   f.Reopen();
   REQUIRE_OK(f.vset->Recover());
@@ -158,13 +158,13 @@ TEST(prev_log_number_makes_two_logs_live_at_once) {
   VersionEdit e;
   e.SetLogNumber(9);        // the mutable memtable's log
   e.SetPrevLogNumber(8);    // the immutable memtable's log -- still live
-  REQUIRE_OK(f.vset->LogAndApply(&e));
+  REQUIRE_OK(f.vset->LogAndApply(&e, nullptr));
   CHECK_EQ(f.vset->MinLiveLog(), 8u);
 
   VersionEdit done;
   done.SetLogNumber(9);
   done.SetPrevLogNumber(0);   // the flush landed; log 8 may now be deleted
-  REQUIRE_OK(f.vset->LogAndApply(&done));
+  REQUIRE_OK(f.vset->LogAndApply(&done, nullptr));
   CHECK_EQ(f.vset->MinLiveLog(), 9u);
 
   f.Reopen();
@@ -251,10 +251,10 @@ TEST(a_torn_manifest_tail_means_the_last_edit_simply_did_not_happen) {
   REQUIRE_OK(f.vset->CreateNew());
   VersionEdit good;
   good.AddFile(0, MakeFile(10, "a", "c"));
-  REQUIRE_OK(f.vset->LogAndApply(&good));
+  REQUIRE_OK(f.vset->LogAndApply(&good, nullptr));
   VersionEdit lost;
   lost.AddFile(0, MakeFile(11, "d", "f"));
-  REQUIRE_OK(f.vset->LogAndApply(&lost));
+  REQUIRE_OK(f.vset->LogAndApply(&lost, nullptr));
 
   std::string cur;
   REQUIRE_OK(ReadFileToString(Env::Default(), CurrentFileName(f.dir.path()), &cur));
@@ -307,7 +307,7 @@ TEST(live_files_are_the_union_over_all_live_versions) {
   REQUIRE_OK(f.vset->CreateNew());
   VersionEdit e1;
   e1.AddFile(0, MakeFile(10, "a", "c"));
-  REQUIRE_OK(f.vset->LogAndApply(&e1));
+  REQUIRE_OK(f.vset->LogAndApply(&e1, nullptr));
 
   Version* pinned = f.vset->current();
   pinned->Ref();   // a reader holds this version
@@ -315,7 +315,7 @@ TEST(live_files_are_the_union_over_all_live_versions) {
   VersionEdit e2;
   e2.DeleteFile(0, 10);
   e2.AddFile(1, MakeFile(11, "a", "c"));
-  REQUIRE_OK(f.vset->LogAndApply(&e2));
+  REQUIRE_OK(f.vset->LogAndApply(&e2, nullptr));
 
   std::set<uint64_t> live;
   f.vset->AddLiveFiles(&live);
@@ -338,7 +338,7 @@ TEST(files_are_searched_shallow_tier_first_and_newest_within_a_tier) {
   e.AddFile(0, MakeFile(20, "a", "z"));
   e.AddFile(0, MakeFile(21, "a", "z"));
   e.AddFile(1, MakeFile(5, "a", "z"));
-  REQUIRE_OK(f.vset->LogAndApply(&e));
+  REQUIRE_OK(f.vset->LogAndApply(&e, nullptr));
 
   std::vector<std::pair<int, uint64_t>> order;
   f.vset->current()->ForEachOverlapping(Slice("m"), [&](int tier, FileMetaData* fm) {
@@ -360,7 +360,7 @@ TEST(the_key_range_filter_skips_files_without_touching_them) {
   e.AddFile(0, MakeFile(1, "a", "c"));
   e.AddFile(0, MakeFile(2, "m", "p"));
   e.AddFile(0, MakeFile(3, "x", "z"));
-  REQUIRE_OK(f.vset->LogAndApply(&e));
+  REQUIRE_OK(f.vset->LogAndApply(&e, nullptr));
 
   int visited = 0;
   f.vset->current()->ForEachOverlapping(Slice("n"), [&](int, FileMetaData*) { ++visited; return true; });

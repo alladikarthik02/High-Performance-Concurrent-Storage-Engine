@@ -829,3 +829,142 @@ Both filesystems now pass all four cases.
    precisely where a list assembled by patching does not look.
 
 ---
+
+## B14 🐛⚔️💾 My own S13 assertion caught a manifest fsync under `db_mutex_` — and a second bug deleted the live manifest
+
+**Symptom.** Two failures in one run of the new write-path suite.
+
+```
+LSMENG ASSERT FAILED include/lsmeng/env.h:60
+  SPEC S13 violated: db_mutex_ held across a blocking Env call
+  #7 lsmeng::VersionSet::LogAndApply     version_set.cc:251
+  #8 lsmeng::DBImpl::FlushImmutableMemtable  db_impl.cc:341
+
+FAIL REQUIRE_OK(d.Open()) -- Corruption: CURRENT names manifest
+     MANIFEST-000002 which cannot be read: NotFound
+```
+
+**Bug 1 — the assertion did its job.** `FlushImmutableMemtable` held `db_mutex_` across
+`LogAndApply`, which appends a `VersionEdit` to the MANIFEST **and fsyncs it**. A manifest
+fsync is milliseconds (T0 measured 339 µs median on `/data`, and that is the fast case);
+holding the lock across it blocks every queued writer and every `Get`, which is precisely
+the p99.9 damage R13 exists to remove. It is also invisible: no wrong answers, no crash,
+just a mysterious latency spike weeks later.
+
+This is **exactly the failure mode SPEC §11.10 was written about** — v1's `MakeRoomForWrite`
+created a log file under the mutex, the review caught it on paper, and the response was to
+build a machine that would catch it in code. Then I reintroduced the same class of bug in a
+different function, and the machine caught it in under a second. `TrackedMutex` +
+`LSMENG_ASSERT` paid for itself the first time the write path existed.
+
+*Fix.* `LogAndApply` now takes the caller's mutex and **releases it across the append and
+the fsync**, re-acquiring before the in-memory install. That is only safe because exactly
+one thread is ever inside it (SPEC §3.8.4's single background thread), so I asserted that
+too rather than assuming it: a `std::atomic<bool> appending_` exchange that fires if a
+second thread ever arrives (S23, E-38).
+
+**Bug 2 — `RemoveObsoleteFiles` deleted the manifest that `CURRENT` was pointing at.**
+
+`Recover()` set `manifest_file_number_ = next_file` — the *next file number to allocate*,
+not the number of the manifest actually in use. GC keeps manifests with
+`number >= manifest_number`, so once the file counter had moved past the live manifest's
+number, the live manifest was classified as obsolete and unlinked. `CURRENT` then named a
+file that no longer existed: **an unopenable database**, which is the exact failure §3.9
+calls "unrecoverable rather than merely untidy."
+
+It survived one reopen and died on the second, which is why a single round-trip test would
+have missed it.
+
+*Fix.* Parse the number out of `CURRENT`'s contents and track it separately. Two variables
+that happened to be equal at the moment I wrote the code are not one variable.
+
+**Generalizes to.** **A quantity's name has to say which quantity it is.** `next_file` and
+`manifest_file_number_` were both "a file number around the manifest," and conflating them
+read as harmless. The same mistake in B12 was `next_file_number` versus the actual maximum
+file number in the set. Twice in one task, both around file numbering — which suggests the
+real lesson is that a counter shared by several concerns wants one accessor per concern,
+not one field per family.
+
+---
+
+## B15 🐛 Group commit looked broken because the counter read a batch it had already cleared
+
+**Symptom.**
+
+```
+MEASURED 362 writes, 719 fsyncs at 8 threads -> 0.50 writes per fsync
+FAIL CHECK_EQ(writes, 3200) -- lhs=362
+FAIL CHECK_LT(syncs, writes) -- lhs=719 rhs=362
+```
+
+More fsyncs than writes, and only 11% of the writes accounted for. On its face: group
+commit inverted, each write paying for *two* fsyncs.
+
+**Root cause.** The instrument, not the engine.
+
+```cpp
+if (batch == tmp_batch_) tmp_batch_->Clear();   // <-- clears the merged group buffer
+if (status.ok()) stats_.Add(kWrites, batch->Count());   // <-- Count() is now 0
+```
+
+`tmp_batch_` is the buffer a leader merges the group into. When a leader batched *any*
+followers, `batch` pointed at `tmp_batch_`, which was cleared one line before its count was
+read — so the write counted **zero**. Only writes that were *not* grouped (a leader with no
+followers, where `batch` is the caller's own) counted at all.
+
+**The part that makes this worth writing down.** The bug is **anti-correlated with the
+thing it measures.** The better group commit worked, the more writers each leader absorbed,
+and the fewer writes got counted. A perfectly functioning batch of 8 recorded 0; a
+completely unbatched write recorded 1. So the metric that exists to *prove* R5 reported
+almost exactly the opposite of the truth, and it reported it as a plausible number rather
+than an obvious one — 0.50 writes per fsync looks like a real, bad result, not like a bug.
+
+With the count read before the clear: **3200 writes, 720 fsyncs, 4.44 writes per fsync.**
+
+**Generalizes to.** Two things.
+1. **Read a value out of a buffer before you recycle the buffer** — obvious in isolation,
+   invisible when the recycle line was written first and the counter added later.
+2. **When a measurement contradicts the mechanism you believe you implemented, suspect the
+   measurement first.** Same family as B8 (a max reduced by summing) and B9 (a race test
+   with its own broken ordering). Three of the sixteen bugs in this journal so far were in
+   the instruments rather than the engine, which is roughly what you would expect and
+   exactly why "the number looked wrong so I changed the code" is a dangerous instinct.
+
+Also fixed here: the test ignored every `Put`'s `Status`. A test that counts things must
+never discard the return value of the thing it is counting.
+
+---
+
+## B16 🐛 Every flushed memtable leaked its whole arena, because the constructor already granted a reference
+
+**Symptom.** Green in `none` and `thread`; in `address`:
+
+```
+==11==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 352 byte(s) in 4 objects allocated from:
+    #1 lsmeng::DBImpl::SwitchMemtableLocked()  db_impl.cc:303
+```
+
+**Root cause.** `MemTable`'s constructor initialises `refs_{1}` — the creator's reference.
+I then wrote `mem_ = new MemTable(); mem_->Ref();`, so every memtable started at **2**. On
+flush, `imm_->Unref()` took it to 1 and it was never destroyed. Every memtable that was ever
+flushed leaked its entire arena — bounded by `write_buffer_size` each, so a long-running
+database would leak megabytes per flush, indefinitely.
+
+**Why only ASan found it.** Nothing breaks. Every read returns the right answer, every write
+succeeds, every crash test passes. The only symptom is memory that never comes back, which
+no assertion in the suite is watching for. This is the third time in this project that the
+sanitizer, not the test, was the thing that found the bug (B7 unaligned load, B14's
+assertion, this) — the tests supplied the workload and the instrumented build supplied the
+verdict.
+
+**Fix.** Delete the `Ref()` at every construction site, and say so in `memtable.h` where the
+next person will look: *the constructor grants one reference; `Ref()` is for **additional**
+holders — a reader pinning it, or a flush pinning it while it works.*
+
+**Generalizes to.** **A refcounted type must document what its constructor's count means, at
+the constructor.** "Starts at 1" and "starts at 0, caller must Ref" are both defensible
+designs, and the caller cannot tell them apart from the header. Ownership conventions that
+live only in the author's head become leaks the moment a second call site appears.
+
+---

@@ -166,6 +166,22 @@ collection unlinks files, and its safety argument is S16. It now passes on both
 filesystems — but it takes **three** mechanisms to do so, one per failure mode (B13), and
 the default stays `false` regardless.
 
+## T8 — the write path
+
+```bash
+./scripts/dev.sh ./build-none/test_db_write   # MEASURED lines
+```
+
+| Fact | Value | Note |
+|---|---|---|
+| **Group commit at 8 threads, all `sync=true`** | **3,200 writes / 720 fsyncs = 4.44 writes per fsync** | `MEASURED`. **R5's mechanism, demonstrated.** Each writer asked for durability; one fsync committed 4.4 of them on average. A ratio near 1.0 would mean group commit is not working |
+| Acknowledged `sync=true` writes lost after a simulated crash | **0 of 300** | `MEASURED`. **R4.** Through `FaultEnv`, which drops un-fsynced bytes — the assertion a `kill -9` test cannot make |
+| Keys surviving reopen across many memtable switches | **2,000 / 2,000** | `MEASURED`. E-36: two logs are live at once, and both are replayed |
+| Concurrent reads during 4 writers + live flush | 30,865, **0 inconsistent** | `MEASURED`, TSan clean |
+
+The full thread sweep (1→8) and the throughput numbers are T11's; this is the *mechanism*
+check that R5 rests on.
+
 ## T0 — deferred to their tasks
 
 | Number | Status | Task |

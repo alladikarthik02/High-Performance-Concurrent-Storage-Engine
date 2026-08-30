@@ -36,6 +36,11 @@ class MemTable {
   // Refcounted: a reader takes a reference under db_mutex_ and then does all its work with
   // no lock held (SPEC 3.7 step 1). The memtable outlives the mutex critical section, not
   // the other way round.
+  //
+  // THE CONSTRUCTOR ALREADY GRANTS ONE REFERENCE to whoever created it. So `new MemTable()`
+  // must NOT be followed by Ref() -- doing that made the count go 2 -> 1 on flush and never
+  // reach zero, leaking the whole arena every time (CHALLENGES B16). Ref() is for
+  // ADDITIONAL holders: a reader pinning it, or the flush pinning it while it works.
   void Ref() { refs_.fetch_add(1, std::memory_order_relaxed); }
   void Unref() {
     if (refs_.fetch_sub(1, std::memory_order_acq_rel) == 1) delete this;
