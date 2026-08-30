@@ -1,0 +1,9 @@
+build-*/
+scratch/
+.DS_Store
+*.o
+compile_commands.json
+perf.data*
+callgrind.out.*
+cachegrind.out.*
+massif.out.*
