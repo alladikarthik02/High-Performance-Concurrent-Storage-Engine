@@ -11,6 +11,8 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <mutex>
+#include <set>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -162,6 +164,33 @@ class PosixWritableFile final : public WritableFile {
   std::string buf_;
 };
 
+// SPEC S16, third mechanism. flock() is per OPEN FILE DESCRIPTION, not per process, so a
+// second LockFile() in the SAME process opens a new fd and flock happily grants it again.
+// The pid-file check cannot catch it either -- the pid in the file is our own, which is
+// indistinguishable from a stale record we are entitled to reclaim.
+//
+// So three mechanisms are needed and each covers a different case:
+//   flock     -> other processes, on filesystems that implement advisory locks
+//   pid file  -> other processes, on filesystems that do NOT (the Docker bind mount, B4)
+//   this set  -> this process, on every filesystem
+// Discovered by running the two-process test on the bind mount: see CHALLENGES B13.
+class InProcessLockTable {
+ public:
+  bool Insert(const std::string& path) {
+    std::lock_guard<std::mutex> g(mu_);
+    return locked_.insert(path).second;
+  }
+  void Remove(const std::string& path) {
+    std::lock_guard<std::mutex> g(mu_);
+    locked_.erase(path);
+  }
+
+ private:
+  std::mutex mu_;
+  std::set<std::string> locked_;
+};
+InProcessLockTable& lock_table() { static InProcessLockTable t; return t; }
+
 class PosixFileLock final : public FileLock {
  public:
   PosixFileLock(std::string name, int fd) : name_(std::move(name)), fd_(fd) {}
@@ -304,13 +333,22 @@ class PosixEnv final : public Env {
 
   Status LockFileImpl(const std::string& f, FileLock** l) override {
     *l = nullptr;
-    int fd = ::open(f.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-    if (fd < 0) return PosixError("open " + f, errno);
 
-    // Mechanism 1: advisory lock. Cheap, and correct wherever it is implemented.
+    // Mechanism 0: this process. Checked FIRST because it is the only one that is correct
+    // on every filesystem, and because failing here costs no file descriptor.
+    if (!lock_table().Insert(f))
+      return Status::IOError("database is already locked by this process: " + f);
+
+    int fd = ::open(f.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) { lock_table().Remove(f); return PosixError("open " + f, errno); }
+
+    // Mechanism 1: advisory lock. Cheap, and correct wherever it is implemented -- which
+    // does NOT include the Docker Desktop bind mount (T0 measured this; wanrep B2 saw it
+    // first). That is why mechanism 2 below is not optional.
     if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
       int err = errno;
       ::close(fd);
+      lock_table().Remove(f);
       return Status::IOError("database is locked (flock): " + f + ": " + std::strerror(err));
     }
 
@@ -326,6 +364,7 @@ class PosixEnv final : public Env {
         unsigned long long live_start = 0;
         if (ProcessStartTime(other_pid, &live_start) && live_start == other_start) {
           ::close(fd);
+          lock_table().Remove(f);
           char msg[192];
           std::snprintf(msg, sizeof(msg),
                         "database is locked by pid %ld (LOCK file %s)", other_pid, f.c_str());
@@ -343,6 +382,7 @@ class PosixEnv final : public Env {
     if (::ftruncate(fd, 0) != 0 || ::pwrite(fd, rec, static_cast<size_t>(len), 0) != len) {
       int err = errno;
       ::close(fd);
+      lock_table().Remove(f);
       return PosixError("write " + f, err);
     }
     ::fdatasync(fd);
@@ -358,6 +398,7 @@ class PosixEnv final : public Env {
     (void)!::ftruncate(p->fd(), 0);
     ::flock(p->fd(), LOCK_UN);
     ::close(p->fd());
+    lock_table().Remove(p->name());
     delete p;
     return Status::OK();
   }

@@ -149,6 +149,23 @@ block read; with them on, 99.2% of those reads never happen.
 Sharding (1 vs 4 vs 16) is built and correct; **the contention delta it exists to produce
 is T12's measurement**, not T6's.
 
+## T7 — the two-process exclusion gate (S16)
+
+```bash
+./scripts/dev.sh ./build-none/test_lock_exclusion                          # /data
+./scripts/dev.sh env LSMENG_TEST_DIR=/work/scratch ./build-none/test_lock_exclusion  # bind mount
+```
+
+| Filesystem | Cross-process exclusion | Same-process | Verdict |
+|---|---|---|---|
+| `/data` (container) | **enforced** | **enforced** | pass |
+| `/work` (bind mount) | **enforced** *(by the pid fallback — `flock` does nothing here)* | **enforced** *(by the in-process table)* | pass |
+
+`MEASURED`. **This is the gate on `gc_orphans_on_open`** (SPEC §3.9 / E-6): orphan
+collection unlinks files, and its safety argument is S16. It now passes on both
+filesystems — but it takes **three** mechanisms to do so, one per failure mode (B13), and
+the default stays `false` regardless.
+
 ## T0 — deferred to their tasks
 
 | Number | Status | Task |

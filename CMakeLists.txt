@@ -61,6 +61,8 @@ add_library(lsmeng STATIC
   src/sst.cc
   src/cache.cc
   src/table_cache.cc
+  src/version_edit.cc
+  src/version_set.cc
 )
 target_link_libraries(lsmeng PUBLIC pthread)
 
@@ -94,6 +96,8 @@ lsmeng_test(test_block)
 lsmeng_test(test_sst)
 lsmeng_test(test_cache)
 lsmeng_test(test_table_cache)
+lsmeng_test(test_version_set)
+lsmeng_test(test_lock_exclusion)
 
 # ---------------------------------------------------------------------------
 # Tools. SPEC 4.3.

@@ -737,3 +737,95 @@ each other, not each against your expectations.** A scan that returns everything
 that finds everything are different claims, and only one of them was true here.
 
 ---
+
+## B12 🐛💾 Recovery trusted a counter that the file set could contradict — and would have overwritten a live SST
+
+**Symptom.** One assertion in the reopen test:
+
+```
+FAIL CHECK_GT(f.vset->NewFileNumber(), 5u) -- lhs=4 rhs=5
+```
+
+After recovering a manifest that records a live file numbered **5**, the version set was
+prepared to hand out **4**, and then **5**, as *fresh* file numbers.
+
+**Root cause.** The MANIFEST carries `next_file_number` as an explicit field, and
+`Recover()` simply believed it: `next_file_number_ = next_file + 1`. But nothing on disk
+guarantees that field is consistent with the file numbers actually recorded in the same
+manifest. A crash between allocating a number and recording the counter, an older build, or
+a caller that constructed a `FileMetaData` without allocating through `NewFileNumber()`
+all produce a manifest where the counter is behind the file set.
+
+**Why it is worse than an off-by-one.** The next flush would create `000005.sst` — directly
+on top of a **live SST the manifest still references**. Every checksum would pass. The
+manifest would be internally consistent. Reads would return whatever the new file happened
+to contain, for keys that used to be in the old one. Silent, total loss of one file's data,
+with nothing anywhere reporting an error.
+
+**Fix.** Trust the **file set**, not the counter. `Recover()` now recomputes a high-water
+mark over every file number, log number and prev-log number it observes, and takes
+`max(next_file + 1, highest_seen + 1)`. `LogAndApply` additionally advances the counter past
+anything an edit records, so a stale manifest cannot be produced in the first place. Both
+sides, because one-sided invariants are what produced this.
+
+**Generalizes to.** **A derived value stored alongside the data it is derived from is a
+consistency obligation, not a shortcut.** Every cache of a computed fact — a count, a
+maximum, a "next" pointer — can drift from the thing it summarises, and the recovery path
+is exactly where you must not assume it has not. Where recomputing is cheap (here: a
+max over records already being parsed), recompute. The stored field is then a hint that
+can only ever make you *more* conservative, never less.
+
+---
+
+## B13 🔬 Three lock mechanisms, and the gap between the two I had
+
+**Symptom.** The two-process exclusion test, run on **both** filesystems:
+
+```
+/data (container fs):       4 tests, 0 failures
+/work/scratch (bind mount): 4 tests, 3 failures
+```
+
+The *cross-process* case passed everywhere. The failing case was the **same-process** one:
+a second `LockFile()` on a path this very process already held returned `OK` on the bind
+mount.
+
+**Root cause, and why neither existing mechanism caught it.**
+
+- **`flock`** is per **open file description**, not per process. A second `LockFile()`
+  opens a *new* fd, and `flock` on a new description is granted. On the container
+  filesystem the kernel still detects the conflict; on the bind mount `flock` does nothing
+  at all (T0 measured this; `wanrep` B2 saw it first), so it granted the lock outright.
+- **The pid file** could not catch it either, and this is the interesting half: the pid in
+  the file was **our own pid**. My code deliberately skips the staleness check when
+  `other_pid == getpid()` — because a process must be able to reclaim a lock record it
+  left behind after its own earlier crash. Same-process reuse and same-process
+  double-locking are *indistinguishable* from the file's contents alone.
+
+So the two mechanisms covered "other process, filesystem implements locks" and "other
+process, filesystem does not" — and **nothing covered "this process."**
+
+**Fix.** A third mechanism: a process-wide `std::set<std::string>` of locked paths, checked
+**first** (it is the only one correct on every filesystem, and failing there costs no file
+descriptor). Each of the three now has a stated job:
+
+| mechanism | covers |
+|---|---|
+| in-process lock table | this process, every filesystem |
+| `flock` | other processes, where advisory locks work |
+| pid + start time | other processes, where they do not |
+
+Both filesystems now pass all four cases.
+
+**Generalizes to.** Two things.
+
+1. **Run the environment-dependent test in every environment you actually use.** The bind
+   mount is not a hypothetical; the build tree lives on it. Testing only the "good"
+   filesystem would have shipped a hole that appears only where the code is developed.
+2. **When you add a fallback for a mechanism, enumerate what each one covers.** I had
+   reasoned "flock, plus a pid file for where flock fails" and stopped — a two-item list
+   that felt exhaustive because it covered the *failure I knew about*. The uncovered case
+   was not a failure of either mechanism; it was in the space **between** them, which is
+   precisely where a list assembled by patching does not look.
+
+---
