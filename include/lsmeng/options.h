@@ -21,6 +21,17 @@ struct Options {
   int cache_shards = 16;                   // 1 = unsharded, for the T12 experiment
   int tier_trigger = 4;                    // T
   int max_tiers = 7;                       // SPEC 3.8.2 -- bounds tier growth (E-32)
+
+  // SPEC 3.8.4's write stalls. Exposed as options rather than constants because T11's
+  // `tier_sweep` has to move them to measure the write-amp/read-amp trade, and because a
+  // test that legitimately runs without a compactor needs to raise them (see T9's model
+  // test). At the slowdown trigger each write sleeps 1 ms -- a deliberate brake handing
+  // CPU to the compactor. At the stop trigger writes block until tier 0 drains.
+  int tier0_slowdown_trigger = 8;
+  int tier0_stop_trigger = 12;
+  // A stall that has not drained in this long becomes a sticky, descriptive error instead
+  // of an infinite hang, so a stall is distinguishable from a deadlock (E-22, E-31).
+  int stall_watchdog_seconds = 10;
   int max_open_files = 500;
   bool paranoid_checks = true;
   bool create_if_missing = true;

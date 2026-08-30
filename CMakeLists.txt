@@ -64,6 +64,8 @@ add_library(lsmeng STATIC
   src/version_edit.cc
   src/version_set.cc
   src/db_impl.cc
+  src/db_iter.cc
+  src/merging_iterator.cc
 )
 target_link_libraries(lsmeng PUBLIC pthread)
 
@@ -100,6 +102,7 @@ lsmeng_test(test_table_cache)
 lsmeng_test(test_version_set)
 lsmeng_test(test_lock_exclusion)
 lsmeng_test(test_db_write)
+lsmeng_test(test_db_read)
 
 # ---------------------------------------------------------------------------
 # Tools. SPEC 4.3.

@@ -968,3 +968,91 @@ designs, and the caller cannot tell them apart from the header. Ownership conven
 live only in the author's head become leaks the moment a second call site appears.
 
 ---
+
+## B17 🐛 Two bugs in one iterator: an infinite loop, and I/O under the lock again
+
+**Symptom 1 — the scan never ended.** The first read test printed its name and hung.
+
+*Root cause.* `DBIter::Next()` must skip every remaining version of the current user key
+before looking for the next one. It compared against `key_`, which stores the **internal**
+key (user key + 8 tag bytes), so the comparison against real user keys never matched. The
+skip loop ran zero times, `FindNextVisible()` re-found the entry it was already on, and the
+caller's `for (...; it->Next())` spun forever.
+
+The interesting part is that this is not a subtle logic error — it is a **units error**.
+`key_` and "the current user key" are both `std::string`s holding key-shaped bytes, and the
+type system cannot tell them apart. The same confusion appears twice more in this file, and
+in both other places I had written `ExtractUserKey(...)` without thinking about it. The one
+that broke was the one where the variable was already sitting there looking correct.
+
+**Symptom 2 — the S13 assertion fired again**, at `Version::AddIterators`.
+
+`NewIterator` took `db_mutex_`, pinned the memtable and the Version, and then called
+`AddIterators` **inside the same critical section** — and `AddIterators` opens every live
+SST through the table cache. That is a file open per file, under the lock that every writer
+and every `Get` needs.
+
+*Fix.* Pin the Version under the lock, then build the iterators **outside** it. This is safe
+for precisely the reason S14 exists: the Version is immutable and refcounted, so once pinned
+it cannot change or be freed, and nothing about it needs the mutex any more.
+
+**Generalizes to.** That is the **second** time (after B14) that the S13 assertion caught
+I/O under `db_mutex_` in code I had just written while thinking about S13. Both times the
+pattern was identical: a function that *looks* like bookkeeping (`LogAndApply`,
+`AddIterators`) turning out to do I/O one or two calls down. The lesson is not "be more
+careful" — it is that **"does this do I/O?" is not answerable by looking at a call site**,
+and a machine that answers it at runtime is worth more than any amount of care. This is the
+concrete argument for R9's claim being *enforced* rather than *asserted in prose*.
+
+---
+
+## B18 🐛 A use-after-free from violating my own iterator contract
+
+**Symptom.** Green in `none` and `thread`. Under ASan:
+
+```
+ERROR: AddressSanitizer: heap-use-after-free
+    #1 lsmeng::Slice::ToString() const
+    #2 SeekToLast   src/db_iter.cc:69
+```
+
+**Root cause.** `SeekToLast` did:
+
+```cpp
+ParsedInternalKey p;
+ParseInternalKey(iter_->key(), &p);        // p.user_key points INTO a data block
+if (ResolveUserKey(p.user_key.ToString())) return;   // ...which re-seeks...
+PrevFrom(p.user_key.ToString());           // ...and this reads freed memory
+```
+
+`ResolveUserKey` performs a `Seek`, which makes the SST's two-level iterator drop its
+current data block and load a different one. The block's buffer is freed, and `p.user_key`
+— a `Slice`, i.e. a bare pointer and length — is left dangling. The first `.ToString()` is
+evaluated before the call and is fine; the second one, after, is not.
+
+**What makes it worth a full entry.** `iterator.h` states the contract in its own header
+comment, which I wrote:
+
+> *`key()` and `value()` are only valid while `Valid()`, and only until the next movement.
+> They point INTO the underlying block or arena; they are not copies.*
+
+That non-owning design is deliberate and is what makes a scan allocation-free. But it means
+**every** local `Slice` derived from an iterator is invalidated by **any** movement of that
+iterator, including movements that happen several frames deeper inside a helper. Three other
+places in the same file get this right (`FindNextVisible`, `PrevFrom`, `Next` all copy
+first); the one that got it wrong is the one where the copy looked redundant because
+`.ToString()` was already being written on the line.
+
+**Fix.** Copy the user key into a `std::string` once, before anything that can move the
+iterator, and use that.
+
+**Generalizes to.** **A non-owning view is a lifetime obligation that the type system does
+not track, and the danger scales with how far away the invalidating call is.** `Slice`,
+`string_view`, and every span-like type share this. The practical rule that would have
+prevented it: *if a view is used after any call that is not obviously pure, copy it at the
+point of creation* — the copy is cheap, and the alternative is a bug that three of four call
+sites avoid by luck rather than by rule. Also, again: **only the sanitizer could see this.**
+Four of the bugs in this journal (B7, B14, B16, B18) were invisible to every assertion in
+the suite and visible immediately to an instrumented build.
+
+---

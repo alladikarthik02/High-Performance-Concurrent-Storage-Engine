@@ -25,6 +25,8 @@ class SnapshotImpl : public Snapshot {
   SequenceNumber sequence;
 };
 
+Iterator* NewDBIterator(Iterator* internal, SequenceNumber sequence);
+
 class DBImpl : public DB {
  public:
   DBImpl(const Options& raw_options, const std::string& dbname);

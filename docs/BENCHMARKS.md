@@ -182,6 +182,29 @@ the default stays `false` regardless.
 The full thread sweep (1→8) and the throughput numbers are T11's; this is the *mechanism*
 check that R5 rests on.
 
+## T9 — the read path, and the model test
+
+```bash
+LSMENG_MODEL_OPS=30000 ./scripts/dev.sh ./build-none/test_db_read
+```
+
+```
+30000 ops: 13453 puts, 6005 deletes, 2950 batches, 601 flushes, 583 reopens,
+           1181 scans; 105 live keys      -- 8 tests, 0 failures  (7m33s)
+```
+
+`MEASURED`. **T9's exit criterion.** 30,000 randomly chosen operations run against a
+`std::map` reference model, with every `Get` compared immediately and a full **forward and
+reverse** scan compared against the model 1,181 times. `Reopen` is in the op mix, so this is
+a recovery test as well — 583 of them. The key space is 150 keys deliberately, so overwrites,
+deletes and resurrections collide constantly.
+
+`CompactRange` is excluded until T10; SPEC §9 states that forward dependency rather than
+hiding it.
+
+Default depth is 4,000 ops (≈3 s) and 600 under sanitizers, so `check.sh` stays usable —
+the deep run above is what certifies the read path.
+
 ## T0 — deferred to their tasks
 
 | Number | Status | Task |

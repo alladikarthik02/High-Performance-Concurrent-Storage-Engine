@@ -60,4 +60,25 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s) {
 
 MemTableIterator* MemTable::NewIterator() { return new MemTableIterator(this); }
 
+namespace {
+class MemTableInternalIterator final : public Iterator {
+ public:
+  explicit MemTableInternalIterator(MemTable* m) : it_(m) {}
+  bool Valid() const override { return it_.Valid(); }
+  void SeekToFirst() override { it_.SeekToFirst(); }
+  void SeekToLast() override { it_.SeekToLast(); }
+  void Seek(const Slice& target) override { it_.Seek(target); }
+  void Next() override { it_.Next(); }
+  void Prev() override { it_.Prev(); }
+  Slice key() const override { return it_.key(); }
+  Slice value() const override { return it_.value(); }
+  Status status() const override { return Status::OK(); }   // memory cannot be corrupt
+
+ private:
+  MemTableIterator it_;
+};
+}  // namespace
+
+Iterator* MemTable::NewInternalIterator() { return new MemTableInternalIterator(this); }
+
 }  // namespace lsmeng

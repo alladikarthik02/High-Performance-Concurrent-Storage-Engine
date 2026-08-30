@@ -5,6 +5,7 @@
 #include "lsmeng/arena.h"
 #include "lsmeng/coding.h"
 #include "lsmeng/dbformat.h"
+#include "lsmeng/iterator.h"
 #include "lsmeng/skiplist.h"
 #include "lsmeng/status.h"
 
@@ -58,6 +59,11 @@ class MemTable {
   bool Get(const LookupKey& key, std::string* value, Status* s);
 
   MemTableIterator* NewIterator();
+
+  // The same traversal, wrapped in the common Iterator interface so the merging iterator
+  // can treat a memtable and an SST identically. Caller owns it; it does NOT own the
+  // memtable, so the caller must keep a reference for its lifetime.
+  Iterator* NewInternalIterator();
 
  private:
   friend class MemTableIterator;

@@ -8,20 +8,17 @@
 
 #include "lsmeng/coding.h"
 #include "lsmeng/sst.h"
+#include "merging_iterator.h"
 
 namespace lsmeng {
 
 namespace {
-constexpr int kTier0SlowdownTrigger = 8;
-constexpr int kTier0StopTrigger = 12;
-
 // SPEC E-22 / E-31. A write stall and a deadlock look identical from outside: in both
 // cases writers are parked on bg_cv_ and nothing moves. The difference is whether anything
 // CAN still make progress. Rather than hang forever and leave the operator to guess, a
-// stall that has not drained within this deadline is converted into a sticky, descriptive
-// error naming the tier-0 file count -- which is the difference between "the database is
-// broken" and "compaction cannot keep up with this write rate".
-constexpr int kStallWatchdogSeconds = 10;
+// stall that has not drained within Options::stall_watchdog_seconds becomes a sticky,
+// descriptive error naming the tier-0 file count -- the difference between "the database
+// is broken" and "compaction cannot keep up with this write rate".
 }  // namespace
 
 DB::~DB() = default;
@@ -214,7 +211,7 @@ Status DBImpl::MakeRoomForWrite(bool force) {
     if (!bg_error_.ok()) return bg_error_;
     if (shutting_down_) return Status::IOError("DB is closing");
 
-    if (allow_delay && versions_->current()->NumFilesAtTier(0) >= kTier0SlowdownTrigger) {
+    if (allow_delay && versions_->current()->NumFilesAtTier(0) >= options_.tier0_slowdown_trigger) {
       // A deliberate brake, not a bug: one millisecond of writer time handed to the
       // compactor. It is visible in p99.9, and SPEC E-11 says that tail is the design
       // rather than noise.
@@ -232,12 +229,12 @@ Status DBImpl::MakeRoomForWrite(bool force) {
       bg_cv_.wait(mutex_, [this] { return imm_ == nullptr || !bg_error_.ok() || shutting_down_; });
       continue;
     }
-    if (versions_->current()->NumFilesAtTier(0) >= kTier0StopTrigger) {
+    if (versions_->current()->NumFilesAtTier(0) >= options_.tier0_stop_trigger) {
       stats_.Add(kStalls, 1);
       const uint64_t stall_start = env_->NowMicros();
       const bool drained = bg_cv_.wait_for(
-          mutex_, std::chrono::seconds(kStallWatchdogSeconds), [this] {
-            return versions_->current()->NumFilesAtTier(0) < kTier0StopTrigger ||
+          mutex_, std::chrono::seconds(options_.stall_watchdog_seconds), [this] {
+            return versions_->current()->NumFilesAtTier(0) < options_.tier0_stop_trigger ||
                    !bg_error_.ok() || shutting_down_;
           });
       stats_.Max(kMaxStallMs, (env_->NowMicros() - stall_start) / 1000);
@@ -248,7 +245,7 @@ Status DBImpl::MakeRoomForWrite(bool force) {
         bg_error_ = Status::IOError(
             "write stalled: tier 0 holds " +
             std::to_string(versions_->current()->NumFilesAtTier(0)) +
-            " files and did not drain in " + std::to_string(kStallWatchdogSeconds) +
+            " files and did not drain in " + std::to_string(options_.stall_watchdog_seconds) +
             "s -- compaction is not keeping up (or is not running)");
         bg_cv_.notify_all();
         return bg_error_;
@@ -544,8 +541,73 @@ Status DBImpl::CompactRange(const Slice*, const Slice*) {
   return Flush();
 }
 
-Iterator* DBImpl::NewIterator(const ReadOptions&) {
-  return NewErrorIterator(Status::NotSupported("iterators land in T9"));
+Iterator* DBImpl::NewIterator(const ReadOptions& options) {
+  std::vector<Iterator*> children;
+  SequenceNumber sequence = 0;
+  std::vector<MemTable*> pinned_mems;
+  Version* pinned_version = nullptr;
+
+  {
+    // S21, exactly as in Get: the sequence number AND the references are taken in ONE
+    // critical section. Capturing the sequence outside it lets a compaction drop the very
+    // version this scan needs, between the two.
+    std::unique_lock<TrackedMutex> lock(mutex_);
+    if (!bg_error_.ok()) return NewErrorIterator(bg_error_);
+    sequence = options.snapshot
+                   ? static_cast<const SnapshotImpl*>(options.snapshot)->sequence
+                   : versions_->LastSequence();
+    mem_->Ref();
+    pinned_mems.push_back(mem_);
+    children.push_back(mem_->NewInternalIterator());   // pure memory, no I/O
+    if (imm_ != nullptr) {
+      imm_->Ref();
+      pinned_mems.push_back(imm_);
+      children.push_back(imm_->NewInternalIterator());
+    }
+    pinned_version = versions_->current();
+    pinned_version->Ref();
+  }
+
+  // OUTSIDE the lock. AddIterators opens SST files through the table cache, which is I/O
+  // -- doing it under db_mutex_ would block every writer and every Get behind a file open
+  // (S13). It is safe here precisely because the Version was pinned above: it is immutable
+  // and cannot be freed while this reference is held, which is the whole point of S14.
+  // Caught by the TrackedMutex assertion, not by a test. See CHALLENGES B17.
+  pinned_version->AddIterators(options, table_cache_.get(), &children);
+
+  Iterator* merged = NewMergingIterator(children.data(), static_cast<int>(children.size()));
+  Iterator* user = NewDBIterator(merged, sequence);
+
+  // A long scan PINS its files against deletion for its whole lifetime -- a space cost, and
+  // the reason SPEC 3.12 says iterators should be short-lived. This wrapper is where those
+  // references are given back.
+  class Pinning final : public Iterator {
+   public:
+    Pinning(Iterator* inner, DBImpl* db, std::vector<MemTable*> mems, Version* v)
+        : inner_(inner), db_(db), mems_(std::move(mems)), v_(v) {}
+    ~Pinning() override {
+      delete inner_;
+      std::unique_lock<TrackedMutex> lock(db_->mutex_);
+      for (MemTable* m : mems_) m->Unref();
+      v_->Unref();
+    }
+    bool Valid() const override { return inner_->Valid(); }
+    void SeekToFirst() override { inner_->SeekToFirst(); }
+    void SeekToLast() override { inner_->SeekToLast(); }
+    void Seek(const Slice& t) override { inner_->Seek(t); }
+    void Next() override { inner_->Next(); }
+    void Prev() override { inner_->Prev(); }
+    Slice key() const override { return inner_->key(); }
+    Slice value() const override { return inner_->value(); }
+    Status status() const override { return inner_->status(); }
+
+   private:
+    Iterator* inner_;
+    DBImpl* db_;
+    std::vector<MemTable*> mems_;
+    Version* v_;
+  };
+  return new Pinning(user, this, std::move(pinned_mems), pinned_version);
 }
 
 bool DBImpl::GetProperty(const Slice& name, std::string* out) {
