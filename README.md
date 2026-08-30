@@ -9,10 +9,33 @@ Résumé project #3 of the Pure Storage set (after `dedupe` and `wanrep`).
 
 ## Status
 
-| | |
-|---|---|
-| Specification | **complete** — `docs/SPEC.md` (v2, revised after an adversarial review) |
-| Implementation | not started — T0 next |
+| Task | | |
+|---|---|---|
+| **T0** | container, build gate, `Env`/`FaultEnv`, S13 enforcement, measured environment | done |
+| **T1 / T1b** | primitives, CRC32C (3 runtime-selected paths), the comparator, stats | done |
+| **T2** | Bloom filter — **measured FPR 0.836% vs 0.82% theory** | done |
+| **T3** | skip list + memtable — lock-free readers, TSan clean | done |
+| **T4** | write-ahead log — exhaustive torn-tail recovery | done |
+| **T5** | SST format, prefix compression, index, footer, `sst_dump` | done |
+| **T6** | sharded LRU block cache + byte-bounded table cache | done |
+| **T7** | MANIFEST, VersionSet, recovery, two-process exclusion gate | done |
+| **T8** | write path — group commit, log rotation, background thread | done |
+| **T9** | read path — merging iterator, snapshots, **model test green** | done |
+| **T10** | tiered compaction — the four spec-review fixes | done |
+| **T11** | histogram, benchmark harness, measured numbers | done |
+| **T12** | profiling pass (`perf`, cachegrind, helgrind, massif) + `RESUME.md` | **in progress** — see `docs/T12-NOTES.md` |
+
+**22 test binaries, green in all three configurations** (plain, ASan+UBSan, TSan).
+
+### Headline measurements (`docs/BENCHMARKS.md`)
+
+- **Group commit:** 6.9× throughput from 1→16 threads with `sync=true`, while the fsync
+  count *falls* 8.5×. At 1 thread: **99.6% of a raw-append-plus-fsync floor**, with a full
+  sorted index.
+- **Bloom filters:** 2.4× throughput and **38× fewer data blocks read** for absent keys.
+- **Cache sharding:** 1.58× throughput, **2.9× better p90** (29 µs → 10 µs).
+- **Model test:** 30,000 random ops against a `std::map` reference — 601 flushes, 583
+  reopens, 1,181 forward+reverse scans, zero mismatches.
 
 ## Documents
 
