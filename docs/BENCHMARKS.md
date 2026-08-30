@@ -109,6 +109,31 @@ bytes and not only by file count.
 | Concurrent entry reads, 1 writer + 8 readers (memtable) | 286,625, **0 inconsistent** | `MEASURED` |
 | **TSan verdict** | **clean** | S6 holds at this layer: no lock anywhere in the skip list, readers on acquire, the single writer on release |
 
+## T5 — the SST file
+
+```bash
+./scripts/dev.sh ./build-none/test_sst        # MEASURED lines
+./scripts/dev.sh ./build-none/sst_dump <file> # per-file inspection
+```
+
+**R6, directly measured** — 20,000 keys in the file, 20,000 lookups for keys that were
+never written:
+
+| `bloom_bits_per_key` | data blocks read | per lookup | rejected by filter |
+|---|---|---|---|
+| **0 (filters off)** | 20,000 | **1.0000** | 0 |
+| **10 (default)** | 156 | **0.0078** | 19,844 |
+
+`MEASURED`. **A 128× reduction in data blocks read for absent keys**, and 0.78% agrees
+with T2's independently measured 0.836% false-positive rate. This is the number behind
+"keeping reads fast through Bloom filters": with filters off, every candidate file costs a
+block read; with them on, 99.2% of those reads never happen.
+
+| Fact | Value |
+|---|---|
+| 5,000 entries, 40 B values, `block_size=512` | 326,801 bytes across 556 data blocks |
+| Prefix compression + index + filter + trailers | see `sst_dump`'s `file/user ratio` |
+
 ## T0 — deferred to their tasks
 
 | Number | Status | Task |

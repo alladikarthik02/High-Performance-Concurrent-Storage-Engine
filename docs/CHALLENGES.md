@@ -671,3 +671,69 @@ keys — and a good argument for the harness printing byte counts on a mismatch,
 now effectively does via the length in the failure message.)
 
 ---
+
+## B11 🐛🔬 The index separator off by exactly one key — the bug the spec predicted by name
+
+**Symptom.** `every_key_is_findable_across_every_block_boundary` failed for 499 of 2000
+keys, and the pattern was the whole diagnosis:
+
+```
+FAIL CHECK_OK(s) -- NotFound [entry=1980]
+FAIL CHECK_EQ(value, ...) -- lhs=dddd... rhs=eeee...  [entry=1980]
+FAIL ... [entry=1984]   FAIL ... [entry=1988]   FAIL ... [entry=1992]
+```
+
+**Every fourth entry**, and the value returned was always the **previous** entry's. With
+`block_size = 200` the file held ~4 entries per block, so the failing keys were exactly the
+ones **first in their block** — and `Get` was reading the block *before* the one holding
+them. Meanwhile a full forward scan returned all 2000 keys correctly, so the file was not
+corrupt; only the lookup path was wrong.
+
+**Root cause.** The index entry for block *i* must have a key `S` satisfying
+
+```
+    last_key(i)  <=  S  <  first_key(i+1)
+```
+
+I wrote the deferred-emission pattern — hold the index entry until the next block starts,
+so a short separator can be chosen — and then used `first_key(i+1)` **itself** as the
+separator. That satisfies the left inequality and **violates the right one by exactly one
+key**. `index_iter->Seek(target)` finds the first index entry with key `>= target`; when
+`target == first_key(i+1)` it matches index entry *i*, whose handle points at block *i*.
+The key lives in block *i+1*, so `Get` looks in the wrong block and returns NotFound or the
+neighbouring value.
+
+**Fix.** Use `last_key(i)` as the separator. Both inequalities then hold by construction
+and there is no boundary to get wrong. It costs a slightly larger index than a
+shortest-separator scheme; correctness first, and the optimisation is a named next step.
+
+**Why this entry matters more than the fix.** SPEC §3.5 predicted this bug *by name*,
+before any code existed:
+
+> *"Getting the `<=` / `<` boundary wrong by one produces a file where exactly the keys on
+> a block boundary go missing — a bug that a random test finds and a hand-written test
+> usually does not (E-9)."*
+
+And then I made it anyway. Three things follow.
+
+1. **Predicting a bug does not prevent it.** What the prediction bought was the *test*:
+   `every_key_is_findable_across_every_block_boundary` exists only because E-9 was written
+   down, and it deliberately sets `block_size = 200` so boundaries are dense — roughly one
+   per four entries instead of one per hundred. With the default 4 KiB block size the same
+   bug would have hidden behind ~99.7% passing lookups.
+2. **The failure was invisible to the obvious test.** The round-trip scan passed. Every
+   checksum passed. `sst_dump` would have shown a perfectly well-formed file. Only a
+   *point lookup for every key* found it — which is precisely the distinction E-9 drew
+   between "a random test finds it" and "a hand-written test usually does not."
+3. **The deferred-emission pattern is what created the opportunity.** I copied the shape of
+   an optimisation (hold the entry so you can pick a short separator) without implementing
+   the optimisation, and the half-copied version had a subtly different invariant. Same
+   shape as C3.2, where a LevelDB shortcut was borrowed without its precondition:
+   **borrowing a structure without its reason is how you inherit its edge cases and none of
+   its guarantees.**
+
+**Generalizes to.** When a lookup path and a scan path can disagree, **test them against
+each other, not each against your expectations.** A scan that returns everything and a Get
+that finds everything are different claims, and only one of them was true here.
+
+---

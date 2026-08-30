@@ -57,6 +57,8 @@ add_library(lsmeng STATIC
   src/memtable.cc
   src/write_batch.cc
   src/wal.cc
+  src/block.cc
+  src/sst.cc
 )
 target_link_libraries(lsmeng PUBLIC pthread)
 
@@ -86,9 +88,14 @@ lsmeng_test(test_bloom)
 lsmeng_test(test_skiplist)
 lsmeng_test(test_memtable)
 lsmeng_test(test_wal)
+lsmeng_test(test_block)
+lsmeng_test(test_sst)
 
 # ---------------------------------------------------------------------------
 # Tools. SPEC 4.3.
 # ---------------------------------------------------------------------------
 add_executable(env_facts tools/env_facts.cc)
 target_link_libraries(env_facts PRIVATE lsmeng)
+
+add_executable(sst_dump tools/sst_dump.cc)
+target_link_libraries(sst_dump PRIVATE lsmeng)
