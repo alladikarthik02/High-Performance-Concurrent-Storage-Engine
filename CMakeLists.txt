@@ -54,6 +54,7 @@ add_library(lsmeng STATIC
   src/env_posix.cc
   src/crc32c.cc
   src/stats.cc
+  src/memtable.cc
 )
 target_link_libraries(lsmeng PUBLIC pthread)
 
@@ -80,6 +81,8 @@ lsmeng_test(test_arena)
 lsmeng_test(test_hash)
 lsmeng_test(test_stats)
 lsmeng_test(test_bloom)
+lsmeng_test(test_skiplist)
+lsmeng_test(test_memtable)
 
 # ---------------------------------------------------------------------------
 # Tools. SPEC 4.3.

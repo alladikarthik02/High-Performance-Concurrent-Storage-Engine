@@ -95,12 +95,26 @@ a deep-tier file holding ~10⁶ keys carries a **~1.25 MiB** resident filter, 15
 default 8 MiB block cache for a single file. That is why the table cache is bounded in
 bytes and not only by file count.
 
+## T3 — skip list and memtable
+
+```bash
+./scripts/dev.sh ./build-none/test_memtable   # MEASURED line
+./scripts/dev.sh ./scripts/check.sh thread    # the TSan verdict
+```
+
+| Fact | Value | Note |
+|---|---|---|
+| **Memtable arena overhead** | **1.28×** | `MEASURED` — real skip-list nodes, real encoding, real random heights. 7,424,136 bytes for 50,000 records of 116 user bytes. **SPEC §3.4 assumed 2–3×; T1's modelled estimate said 1.48×; the truth is 1.28×.** A 4 MiB `write_buffer_size` therefore holds ~3.1 MiB of user data, not the ~1.5 MiB the spec implied — so memtables hold roughly twice as many records as planned, and flush half as often |
+| Concurrent reads, 1 writer + 8 readers (skip list) | ~600,000, **0 torn, 0 from-future** | `MEASURED` |
+| Concurrent entry reads, 1 writer + 8 readers (memtable) | 286,625, **0 inconsistent** | `MEASURED` |
+| **TSan verdict** | **clean** | S6 holds at this layer: no lock anywhere in the skip list, readers on acquire, the single writer on release |
+
 ## T0 — deferred to their tasks
 
 | Number | Status | Task |
 |---|---|---|
 | Group commit: `wal-syncs` ≪ `writes` at 8 threads | `ASSUMED` | T8 |
-| Memtable arena bytes vs real skip-list nodes | measured at 1.48× for a modelled node in T1; refine | T3 |
+
 
 | Cache sharding removes contention | `ASSUMED` | T12 |
 | Tier count / read amp under overwrite | `ASSUMED` | T11 |

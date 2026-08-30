@@ -563,3 +563,64 @@ and generally, is to make the reduction explicit and let the compiler check that
 counter declares one.
 
 ---
+
+## B9 ⚔️ A false positive from the concurrency test's own memory ordering
+
+**Symptom.** The skip-list race test reported **66 torn observations** out of ~600,000
+concurrent reads. A torn read in a lock-free structure is the worst possible result: it
+means the release/acquire discipline in `skiplist.h` — the thing SPEC calls "the single
+most important memory-ordering fact in the project" — was broken.
+
+**Hypotheses.**
+- (H1) The `SetNext` release store is in the wrong place, so a node is reachable before its
+  key is initialised. — The obvious suspect, and the expensive one to chase.
+- (H2) `max_height_` being `relaxed` loses nodes during a height increase. — Plausible; the
+  relaxed store is the one deliberate weakening in the file.
+- (H3) **The test's own synchronisation is wrong.** — Correct.
+
+**How I isolated it.** The test folded two different invariants into one counter, so a
+failure could not be attributed. Splitting them was the whole diagnosis:
+
+```
+(a) torn:        a node whose two redundant key halves disagree
+(b) from_future: a key numbered higher than anything published
+```
+
+After the split: `0 torn, 0 from-future` — because fixing (b) was also fixing the bug.
+
+**Root cause.** The test loaded the `highest` watermark **once, before** starting a
+full traversal of a list that a writer was still growing:
+
+```cpp
+const uint64_t hi = highest.load(acquire);   // read once...
+for (it.SeekToFirst(); it.Valid(); it.Next())  // ...then walk 40,000 nodes
+    if ((k & 0xFFFFFFFF) > hi + 1) torn++;     // comparing against a stale bound
+```
+
+By the time the traversal reached the tail, the writer had legitimately published
+thousands more keys. The "torn" reads were the test comparing a late observation against a
+bound captured long before. Worse, the correct order is the opposite of the intuitive one:
+the writer does `Insert(n)` **then** `highest.store(n)`, so a reader can correctly see key
+`n` while `highest` still reads `n-1`. The bound must be loaded **after** the observation,
+not before, and the check is `k <= hi_after + 1`.
+
+**Fix.** Load `highest` after reading each key; keep the two counters separate so the two
+failure modes can never be confused again.
+
+**Generalizes to.** Three things, and the last is the one I want to remember.
+
+1. **A test of a lock-free structure needs its own memory-ordering argument**, written down
+   as carefully as the structure's. I had reasoned hard about `SetNext`/`Next` and then
+   written the harness by feel.
+2. **A concurrency test that folds two invariants into one counter cannot be debugged.**
+   The split took two minutes and *was* the diagnosis.
+3. **A test failure is not evidence about the code until you know which assertion fired.**
+   My first instinct was to re-read `skiplist.h`, and the bug was thirty lines away in the
+   file I had just written. The prior should run the other way: new test code is more
+   likely wrong than code that has been thought about twice.
+
+Verdict on the actual question: **zero torn reads across ~600k concurrent observations, and
+TSan clean at 1 writer + 8 readers** in both the skip-list and memtable suites. S6 holds at
+this layer.
+
+---
