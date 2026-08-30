@@ -2,6 +2,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -26,6 +27,29 @@ class SnapshotImpl : public Snapshot {
 };
 
 Iterator* NewDBIterator(Iterator* internal, SequenceNumber sequence);
+
+// SPEC 3.8. One compaction's inputs and where its output goes.
+struct Compaction {
+  int input_tier = 0;
+  int output_tier = 0;
+  std::vector<FileMetaData*> inputs;
+  // Every live file in the output tier or DEEPER that is NOT an input. A tombstone may be
+  // dropped only if none of these could hold an older value for the key -- `is_bottom_tier`
+  // alone is NOT that test, because tiered compaction writes into a tier that already holds
+  // older, non-input files the merge never reads (SPEC 3.8.3, 11.1, E-2e).
+  std::vector<FileMetaData*> others;
+  SequenceNumber oldest_snapshot = 0;
+  // Which tier each input came from. Normally all input_tier, but the max_tiers fold
+  // (SPEC 3.8.2) also pulls in every file of the deepest tier -- and deleting a file from
+  // the wrong tier leaves a phantom entry the read path would still search.
+  std::map<uint64_t, int> input_tier_of;
+
+  bool NoOlderDataCanExist(const Slice& user_key) const;
+  int InputTierFor(uint64_t number) const {
+    auto it = input_tier_of.find(number);
+    return it == input_tier_of.end() ? input_tier : it->second;
+  }
+};
 
 class DBImpl : public DB {
  public:
@@ -67,6 +91,9 @@ class DBImpl : public DB {
   void MaybeScheduleBackground();
   void BackgroundLoop();
   Status FlushImmutableMemtable();
+  bool PickCompaction(Compaction* c);              // mutex held
+  Status DoCompaction(Compaction* c);              // mutex NOT held
+  bool ShouldCompact() const;                      // mutex held
   Status WriteLevel0Table(MemTable* mem, VersionEdit* edit);
   Status RecoverLogFile(uint64_t log_number, SequenceNumber* max_sequence,
                         VersionEdit* edit, bool* saved_a_table);
@@ -106,6 +133,7 @@ class DBImpl : public DB {
   std::thread bg_thread_;
   bool bg_running_ = false;
   bool bg_work_scheduled_ = false;
+  bool manual_compaction_requested_ = false;
   bool shutting_down_ = false;
   bool closed_ = false;
   Status bg_error_;                          // sticky (S17)

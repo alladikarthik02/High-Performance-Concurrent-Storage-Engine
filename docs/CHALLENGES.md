@@ -1056,3 +1056,52 @@ Four of the bugs in this journal (B7, B14, B16, B18) were invisible to every ass
 the suite and visible immediately to an instrumented build.
 
 ---
+
+## B19 🐛 A leak that only recovery could produce, and two assertions that were wrong about what "reclaimed" means
+
+**Part 1 — the leak.** ASan, only after compaction landed:
+
+```
+Direct leak of 416 byte(s) in 4 objects allocated from:
+    #1 lsmeng::VersionBuilder::Apply(VersionEdit const&)  version_set.cc:128
+```
+
+`VersionBuilder` applies a sequence of edits to a base `Version` and produces the next one.
+For each **added** file it allocates a `FileMetaData` and puts it in `tiers_`; `SaveTo()`
+then hands ownership to the new version via refcounts. For each **deleted** file it removes
+the pointer from `tiers_`.
+
+The gap: a file **added by one edit and deleted by a later edit applied to the same
+builder** is removed from `tiers_` and therefore never adopted by `SaveTo()` — so nobody
+ever frees it. In normal operation each edit gets its own builder and this cannot happen.
+**Recovery is the exception**: it replays the entire manifest through *one* builder, so
+every file that was ever flushed and later compacted away is allocated and orphaned. One
+leak per compacted file, on every open, growing with the database's history.
+
+*Fix.* `SaveTo()` deletes every allocation the final version did not adopt, and the
+destructor frees them all if `SaveTo()` was never reached.
+
+**Part 2 — two assertions that failed on correct code.** The E-33 test ("compaction
+actually reclaims space") went through three versions before it tested the right thing.
+
+- *v1: file count shrinks.* Failed at 4 files → 4 files. A merge can discard most of a
+  file's contents while leaving the same number of files.
+- *v2: live bytes shrink.* Failed at 27,381 → 27,381. **Compaction runs in the background
+  throughout the writes**, so by the time a test can read a "before" figure, the
+  reclamation has already happened. There is no observable before-state.
+- *v3: live ENTRIES on disk.* 6,000 writes over 500 distinct keys leaves 6,000 entries if
+  the merge drops nothing, and ~500 if it works. **Measured: 1,320.** If E-33 regressed —
+  `oldest_snapshot_seq` accidentally 0 — it would be 6,000 and nothing else would change.
+
+**Generalizes to.** **"Did the optimisation happen?" is not answerable by comparing before
+and after when the optimisation is asynchronous.** Both of my first two assertions assumed a
+quiescent system, which a background compactor is definitionally not. The fix was to stop
+measuring a *delta* and measure an *invariant of the final state* — one whose value differs
+by an order of magnitude between working and broken. That is a better test regardless: it
+does not depend on timing, and it states what "reclaimed" actually means (superseded
+versions are gone) instead of a proxy for it.
+
+Adding `lsmeng.live-entries` for this also turned out to be the right instrument generally:
+it is what SPEC E-33's own defence describes, and no counter I had exposed could express it.
+
+---

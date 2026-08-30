@@ -33,6 +33,13 @@ uint64_t Version::TotalBytes() const {
   return n;
 }
 
+uint64_t Version::TotalEntries() const {
+  uint64_t n = 0;
+  for (const auto& tier : files_)
+    for (const FileMetaData* f : tier) n += f->num_entries;
+  return n;
+}
+
 void Version::ForEachOverlapping(const Slice& user_key,
                                  const std::function<bool(int, FileMetaData*)>& fn) const {
   for (int tier = 0; tier < NumTiers(); ++tier) {
@@ -104,7 +111,11 @@ class VersionBuilder {
     for (size_t t = 0; t < base_->files_.size(); ++t)
       for (FileMetaData* f : base_->files_[t]) tiers_[t].push_back(f);
   }
-  ~VersionBuilder() { base_->Unref(); }
+  ~VersionBuilder() {
+    // If SaveTo() was never reached (an edit failed to decode, say), nothing adopted these.
+    for (FileMetaData* f : owned_) delete f;
+    base_->Unref();
+  }
 
   void Apply(const VersionEdit& edit) {
     for (const auto& d : edit.deleted_files_) {
@@ -127,15 +138,21 @@ class VersionBuilder {
 
   void SaveTo(Version* v) {
     v->files_ = tiers_;
+    std::set<const FileMetaData*> adopted;
     for (auto& tier : v->files_) {
       // Ascending file number within a tier: allocation order, hence write order. The read
       // path reverses it for recency; keeping the stored order canonical makes the
       // manifest and DebugString deterministic.
       std::sort(tier.begin(), tier.end(),
                 [](const FileMetaData* a, const FileMetaData* b) { return a->number < b->number; });
-      for (FileMetaData* f : tier) ++f->refs;
+      for (FileMetaData* f : tier) { ++f->refs; adopted.insert(f); }
     }
-    owned_.clear();   // ownership has passed to the version's refcounts
+    // A file ADDED by one edit and DELETED by a later edit applied to the SAME builder is
+    // never adopted by the final version -- and recovery does exactly that on every
+    // flush-then-compact sequence in the manifest. Without this it leaks, silently, once
+    // per compacted file. ASan found it; nothing else could. See CHALLENGES B19.
+    for (FileMetaData* f : owned_) if (adopted.count(f) == 0) delete f;
+    owned_.clear();
   }
 
  private:

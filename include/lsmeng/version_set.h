@@ -37,6 +37,11 @@ class Version {
     return tier < NumTiers() ? static_cast<int>(files_[tier].size()) : 0;
   }
   uint64_t TotalBytes() const;
+  // Total entries across every live SST -- INCLUDING superseded versions and tombstones.
+  // This is the direct measure of whether compaction dropped anything (E-33): 6,000 writes
+  // over 500 distinct keys leaves 6,000 entries if nothing is dropped and ~500 if the
+  // merge is working, while the file COUNT and even the byte total can look identical.
+  uint64_t TotalEntries() const;
 
   // SPEC 3.7 step 5. Tiers shallow to deep; within a tier, newest file number first.
   //

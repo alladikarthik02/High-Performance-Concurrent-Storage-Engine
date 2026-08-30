@@ -205,6 +205,24 @@ hiding it.
 Default depth is 4,000 ops (≈3 s) and 600 under sanitizers, so `check.sh` stays usable —
 the deep run above is what certifies the read path.
 
+## T10 — tiered compaction
+
+```bash
+./scripts/dev.sh ./build-none/test_compaction
+LSMENG_MODEL_OPS=20000 ./scripts/dev.sh ./build-none/test_db_read
+```
+
+| Fact | Value | Note |
+|---|---|---|
+| **Entries on disk after 6,000 writes over 500 keys** | **1,320** (500 live) | `MEASURED`. **E-33.** With `oldest_snapshot_seq` accidentally 0, this would be **6,000** and no other test would notice |
+| 2,000 keys written then all deleted, then compacted | **0 live keys**, 377,917 bytes compacted | `MEASURED`. Tombstones and their values are both reclaimed |
+| Tier count after 40 overwrite rounds, `max_tiers=4` | **`t3=1`** — nothing beyond tier 3 | `MEASURED`. **E-32:** tier count is bounded by live data, not by total bytes written |
+| Concurrent readers + writers + live compaction | 82,279 reads, **0 inconsistent**, 7 compactions | `MEASURED`, TSan clean. **R8** |
+| **Model test, full op mix** | **20,000 ops: 9,106 puts, 3,985 deletes, 1,981 batches, 200 flushes, 199 `CompactRange`, 388 reopens, 755 scans — 0 failures** | `MEASURED`. **T10's exit criterion.** Compaction in the op mix is what makes the E-2 resurrection bugs catchable by construction rather than by hand-built scenario |
+
+All five E-2 resurrection scenarios have their own hand-built test as well, because three of
+them (E-2a, E-2d, E-2e) correspond to bugs SPEC v1 actually had.
+
 ## T0 — deferred to their tasks
 
 | Number | Status | Task |

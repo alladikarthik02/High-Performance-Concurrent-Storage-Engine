@@ -208,13 +208,16 @@ TEST(many_versions_of_one_key_are_deduplicated) {
 TEST(differential_against_a_std_map_model) {
   // ***THE MILESTONE***. SPEC 7 layer 3 / T9's exit criterion.
   //
-  // Op mix: Put / Delete / Get / Scan / batch / Flush / Snapshot / ReleaseSnapshot /
-  // Reopen. CompactRange is excluded because compaction lands in T10 -- SPEC section 9
-  // states that forward dependency rather than hiding it.
+  // Op mix: Put / Delete / Get / Scan / batch / Flush / CompactRange / Snapshot /
+  // ReleaseSnapshot / Reopen -- the FULL mix from SPEC 7 layer 3, with CompactRange added
+  // once T10 landed. Compaction in the mix is what makes this test able to catch the
+  // resurrection bugs of E-2 by construction rather than by hand-built scenario.
   //
   // The key space is 150 keys on purpose. Overwrites and deletes must collide constantly,
   // because the bugs being hunted are all about WHICH version wins.
-  Db d(24 * 1024, /*allow_unbounded_tier0=*/true);   // small buffer -> constant flushes and real multi-SST merges
+  // T10 landed, so the DEFAULT tier-0 triggers apply: the write stall is now part of
+  // what is being tested rather than something to disable.
+  Db d(24 * 1024);
   std::map<std::string, std::string> model;
   testing::Rng rng(testing::seed());
 
@@ -241,7 +244,7 @@ TEST(differential_against_a_std_map_model) {
 #endif
   }();
   const int kKeys = 150;
-  int puts = 0, dels = 0, batches = 0, flushes = 0, reopens = 0, scans = 0;
+  int puts = 0, dels = 0, batches = 0, flushes = 0, reopens = 0, scans = 0, compactions = 0;
 
   auto key_of = [&](uint32_t n) { return "k" + std::to_string(1000 + n); };
 
@@ -314,9 +317,12 @@ TEST(differential_against_a_std_map_model) {
         if (i < through.size()) { CHECK_EQ(through[i].first, kv.first); CHECK_EQ(through[i].second, kv.second); }
         ++i;
       }
-    } else if (r < 98) {                // Flush
+    } else if (r < 97) {                // Flush
       REQUIRE_OK(d->Flush());
       ++flushes;
+    } else if (r < 98) {                // CompactRange -- the whole key space
+      REQUIRE_OK(d->CompactRange(nullptr, nullptr));
+      ++compactions;
     } else {                            // Reopen -- makes this a recovery test too
       REQUIRE_OK(d.Open());
       ++reopens;
@@ -343,9 +349,9 @@ TEST(differential_against_a_std_map_model) {
     ++i;
   }
   std::fprintf(stderr,
-               "   %d ops: %d puts, %d deletes, %d batches, %d flushes, %d reopens, "
-               "%d scans; %zu live keys\n",
-               kOps, puts, dels, batches, flushes, reopens, scans, model.size());
+               "   %d ops: %d puts, %d deletes, %d batches, %d flushes, %d compactions, "
+               "%d reopens, %d scans; %zu live keys\n",
+               kOps, puts, dels, batches, flushes, compactions, reopens, scans, model.size());
 }
 
 RUN_ALL()

@@ -309,9 +309,11 @@ Status DBImpl::SwitchMemtableLocked() {
 
 void DBImpl::MaybeScheduleBackground() {
   if (shutting_down_ || !bg_error_.ok()) return;
-  if (bg_work_scheduled_) return;
-  if (imm_ == nullptr) return;      // nothing to do yet (compaction joins in T10)
+  if (imm_ == nullptr && !ShouldCompact() && !manual_compaction_requested_) return;
   bg_work_scheduled_ = true;
+  // Notify UNCONDITIONALLY rather than only when transitioning to scheduled. An early
+  // return before the notify is how a wakeup gets lost when work arrives while the
+  // background thread is between finishing one job and re-checking (S22).
   bg_cv_.notify_all();
   if (!bg_running_) {
     bg_running_ = true;
@@ -325,21 +327,39 @@ void DBImpl::MaybeScheduleBackground() {
 void DBImpl::BackgroundLoop() {
   std::unique_lock<TrackedMutex> lock(mutex_);
   while (true) {
-    bg_cv_.wait(lock, [this] { return shutting_down_ || (imm_ != nullptr && bg_error_.ok()); });
+    bg_cv_.wait(lock, [this] {
+      return shutting_down_ ||
+             (bg_error_.ok() && (imm_ != nullptr || ShouldCompact() || manual_compaction_requested_));
+    });
     if (shutting_down_) break;
-    if (imm_ != nullptr && bg_error_.ok()) {
+    if (!bg_error_.ok()) { bg_work_scheduled_ = false; bg_cv_.notify_all(); continue; }
+
+    Status s;
+    if (imm_ != nullptr) {
+      // FLUSH FIRST, ALWAYS. A pending flush is what holds a WAL open and what feeds tier
+      // 0, so draining it takes precedence over reducing read amplification deeper down
+      // (SPEC 3.8.4).
       lock.unlock();
-      Status s = FlushImmutableMemtable();
+      s = FlushImmutableMemtable();
       lock.lock();
-      if (!s.ok()) {
-        // E-23: a background thread that dies silently lets tier 0 grow without bound and
-        // stalls everything with no error surfaced. The error is sticky and every waiter
-        // is woken so they can return it.
-        bg_error_ = s;
+    } else {
+      Compaction c;
+      if (PickCompaction(&c)) {
+        lock.unlock();
+        s = DoCompaction(&c);
+        lock.lock();
+      } else {
+        manual_compaction_requested_ = false;
       }
-      bg_work_scheduled_ = false;
-      bg_cv_.notify_all();
     }
+    if (!s.ok()) {
+      // E-23: a background thread that dies silently lets tier 0 grow without bound and
+      // stalls everything with no error surfaced. Sticky, and every waiter is woken so
+      // they can return it (S22).
+      bg_error_ = s;
+    }
+    bg_work_scheduled_ = (imm_ != nullptr) || ShouldCompact();
+    bg_cv_.notify_all();
   }
   bg_work_scheduled_ = false;
   bg_cv_.notify_all();
@@ -374,6 +394,9 @@ Status DBImpl::FlushImmutableMemtable() {
       imm_ = nullptr;
       has_imm_.store(false, std::memory_order_release);
       RemoveObsoleteFiles();
+      // A compaction into tier t+1 can make IT eligible too, so eligibility is re-checked
+      // after every flush and every compaction and the work cascades (SPEC 3.8.2).
+      MaybeScheduleBackground();
     }
     m->Unref();
     bg_cv_.notify_all();
@@ -535,10 +558,34 @@ Status DBImpl::Flush() {
   return bg_error_;
 }
 
-Status DBImpl::CompactRange(const Slice*, const Slice*) {
-  // T10 implements this. Flushing is the part that exists now, and returning OK for the
-  // rest would be a lie a test could not see.
-  return Flush();
+// SPEC 4.1. `nullptr` means unbounded in that direction -- an empty Slice cannot serve as
+// a sentinel because the EMPTY KEY IS LEGAL (SPEC 3.1).
+//
+// The range arguments are accepted and, for now, deliberately ignored in favour of
+// compacting everything that is eligible: the picker works tier-by-tier over whole files,
+// and a range-restricted picker would need its own proof that it preserves the 3.8.1
+// ordering invariant. Saying so is better than silently doing something else -- what
+// callers actually need from this (tests, benchmarks, `lsmeng_cli compact`) is "drain the
+// tiers", and that is exactly what it does.
+Status DBImpl::CompactRange(const Slice* begin, const Slice* end) {
+  (void)begin;
+  (void)end;
+  Status s = Flush();
+  if (!s.ok()) return s;
+  std::unique_lock<TrackedMutex> lock(mutex_);
+  while (bg_error_.ok() && !shutting_down_ && ShouldCompact()) {
+    manual_compaction_requested_ = true;
+    MaybeScheduleBackground();
+    const bool progressed = bg_cv_.wait_for(
+        mutex_, std::chrono::seconds(options_.stall_watchdog_seconds),
+        [this] { return !ShouldCompact() || !bg_error_.ok() || shutting_down_; });
+    if (!progressed && bg_error_.ok() && !shutting_down_) {
+      return Status::IOError("CompactRange did not converge within " +
+                             std::to_string(options_.stall_watchdog_seconds) + "s");
+    }
+  }
+  manual_compaction_requested_ = false;
+  return bg_error_;
 }
 
 Iterator* DBImpl::NewIterator(const ReadOptions& options) {
@@ -616,6 +663,20 @@ bool DBImpl::GetProperty(const Slice& name, std::string* out) {
     const int tier = std::atoi(n.c_str() + std::strlen("lsmeng.num-files-at-tier"));
     std::unique_lock<TrackedMutex> lock(mutex_);
     *out = std::to_string(versions_->current()->NumFilesAtTier(tier));
+    return true;
+  }
+  if (n == "lsmeng.live-bytes") {
+    // Total bytes of every SST in the current version. This -- not the file COUNT -- is
+    // what says compaction reclaimed anything: a merge can leave the same number of files
+    // while discarding most of their contents, which is exactly what a heavy-overwrite
+    // workload produces (E-33).
+    std::unique_lock<TrackedMutex> lock(mutex_);
+    *out = std::to_string(versions_->current()->TotalBytes());
+    return true;
+  }
+  if (n == "lsmeng.live-entries") {
+    std::unique_lock<TrackedMutex> lock(mutex_);
+    *out = std::to_string(versions_->current()->TotalEntries());
     return true;
   }
   if (n == "lsmeng.memtable-bytes") {
