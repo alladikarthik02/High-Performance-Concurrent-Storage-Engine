@@ -304,6 +304,15 @@ durability bug. Hence step 5 stops the batch at the first differing `sync` flag 
 16 threads while writes/s climbs. If that graph does not appear, group commit is not
 working and R5 is not earned.
 
+**`MEASURED` in T11 — it appears.** From 1 to 16 threads with every writer asking
+`sync=true`: throughput 3,031 → 20,950 ops/s (**6.9×**) while the fsync count *falls*
+40,000 → 4,718 (**8.5×**), i.e. **1.00 → 8.48 writes per fsync**. At one thread the engine
+sustains 99.6% of a raw-`write`-plus-`fsync` floor while maintaining a full sorted index.
+
+The counterpoint is equally measured and worth volunteering: with `sync=false`, throughput
+*falls* with thread count (1.05M → 169k, 1 → 8 threads). Group commit amortises an expensive
+operation; where there is none to amortise, the serialisation is pure cost.
+
 #### 3.2.1 `MakeRoomForWrite` performs no I/O — and why that needed saying
 
 A memtable switch needs a **new log file**, and creating one is `open(O_CREAT)` plus an
@@ -430,9 +439,12 @@ keys stored inline, allocated from an arena.
 
 **Arena.** 4 KiB blocks, bump allocation, no per-node free. Usage tracked in an
 `atomic<size_t>` so `MakeRoomForWrite` can compare against `write_buffer_size`. The number
-tracked is **arena bytes, not user bytes** — the difference (node headers, height
-pointers, alignment) is roughly 2–3× for small records, which is why a "4 MiB memtable"
-holds far less than 4 MiB of user data. `ASSUMED`; T3 measures the real ratio.
+tracked is **arena bytes, not user bytes** — the difference is node headers, height
+pointers and alignment. **`MEASURED` in T3: 1.28×** for 16 B keys and 100 B values, not the
+2–3× this spec originally assumed. So a 4 MiB `write_buffer_size` holds ~3.1 MiB of user
+data and flushes roughly half as often as the pessimistic estimate predicted — which
+matters, because flush frequency drives tier-0 pressure and therefore the write stalls of
+§3.8.4.
 
 ### 3.5 The SST file format
 
@@ -924,8 +936,16 @@ a disk read, serialising every reader behind the slowest I/O. Cost: a rare dupli
 Benefit: L2 is never held during I/O. Documented, not accidental (E-12).
 
 **Where the contention will be** — the hypothesis T12 exists to test: `db_mutex_` on the
-read path (every `Get` takes it at §3.7 step 1) and the block cache shards. `ASSUMED`; if
-the profiler says otherwise, the spec is wrong and gets corrected.
+read path (every `Get` takes it at §3.7 step 1) and the block cache shards.
+
+**`MEASURED` in T12, and the hypothesis was half wrong.** Sharding the block cache is worth
+1.58× throughput and 2.9× at p90, so that half stands. But in the configuration deliberately
+rigged to be lock-bound, `perf` attributed **13.7% of cycles to allocation against 8.0% to
+lock machinery** — a larger cost this section did not anticipate, caused by a `std::string`
+built *inside* the shard mutex on every cache lookup plus three heap iterators per point
+lookup. Both are fixed (+41% throughput, p90 −29%, run-to-run spread 24% → 1.4%), and the
+bottleneck has moved to iterator allocation on the *scan* path. `BENCHMARKS.md` §T12,
+`CHALLENGES.md` B21.
 
 ### 3.11 The block cache
 
@@ -936,9 +956,13 @@ Sharding is the point. An unsharded LRU serialises *every* block access in the p
 behind one mutex — and unlike a structure that is merely read, an LRU is **mutated on every
 hit** (the entry moves to the list head), so even a pure-read workload contends. This is the
 concrete, measurable "removed contention" story for R12: T12 benchmarks 1 vs 4 vs 16 shards
-and reports the delta. `ASSUMED` until measured — if sharding turns out not to matter at
-these thread counts, that negative result is **reported, not buried** (the `wanrep`
-precedent: its "lock-free beats a mutex" hypothesis was measured and killed).
+and reports the delta.
+
+**`MEASURED` in T11/T12: it matters.** 1 → 16 shards at 8 threads gives **1.58× throughput
+and p90 from 29 µs to 10 µs**. Note what did *not* move: **p99.9 is unchanged (240 → 295 µs)**,
+so the deep tail is not the cache lock — under the mixed workload it is compaction, and that
+negative result is reported rather than buried (the `wanrep` precedent: its "lock-free beats
+a mutex" hypothesis was measured and killed).
 
 Entries are refcounted so a block in use is not evicted under its reader.
 
