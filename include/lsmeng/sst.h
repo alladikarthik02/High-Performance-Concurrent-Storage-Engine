@@ -136,6 +136,12 @@ class SstReader {
   Status ReadBlock(const BlockHandle& handle, bool verify, std::string* out) const;
   Iterator* BlockIterator(const Slice& index_value) const;
 
+  // Fetches a data block for a POINT lookup with no heap iterator. On success the caller
+  // must release exactly one of the two outputs: `*cache_handle` if it is non-null (the
+  // block came from the cache), or `*owned` otherwise (it did not).
+  struct BlockRef;
+  Status FetchBlock(const BlockHandle& handle, BlockRef* out) const;
+
   const Options options_;
   std::unique_ptr<RandomAccessFile> file_;
   Stats* stats_;

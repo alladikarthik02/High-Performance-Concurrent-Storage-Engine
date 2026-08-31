@@ -1595,7 +1595,8 @@ one, and naming it is what shows the profiler was read rather than run.
 **`perf`.** Under Docker Desktop on macOS the container runs in a LinuxKit VM with no exposed
 PMU. Hardware events (`cycles`, `instructions`, `cache-misses`, `LLC-load-misses`) are expected
 to report `<not supported>`, and `perf lock` needs kernel lock events that are not enabled.
-`ASSUMED`; T0 confirms or kills it.
+**`MEASURED` in T0: the prediction was correct** — `cycles:u` and `instructions:u` both report
+`<not supported>`, while the software `cpu-clock` event works. Every T12 profile uses it.
 
 *If confirmed*, the substitutes are named now rather than improvised later:
 - `perf record -e cpu-clock` — a **software** event, works under virtualisation, gives an

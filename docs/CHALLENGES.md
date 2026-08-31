@@ -1149,3 +1149,90 @@ figures almost exactly.
    one of them was the question I had asked.
 
 ---
+
+## B21 🔬🐛 The profiler said allocation, not locks — and the fix reintroduced B18's bug in a new place
+
+**Part 1 — what the profile actually said.**
+
+SPEC §3.10 predicted where the contention would be — `db_mutex_` on the read path and the
+block-cache shards — and marked it `ASSUMED`. `perf record -e cpu-clock` on `read_hot` at 8
+threads with **one** cache shard, i.e. the configuration deliberately rigged to be
+lock-bound:
+
+| group | % cycles |
+|---|---|
+| lock machinery | **8.0%** |
+| **allocation** | **13.7%** |
+
+**Allocation cost more than lock contention in the case set up to be about lock
+contention.** The prediction was not wrong — T11 had already measured sharding at 1.58× —
+but something larger was sitting next to it that nobody had thought about.
+
+Reading the read path with that in mind, a `Get` on a cache **hit** was doing four heap
+allocations:
+
+- `Cache::BlockKey()` returned a `std::string` (16 bytes, heap) per block access;
+- `Cache::Shard::Lookup` did `table_.find(key.ToString())` — **another allocation,
+  constructed while holding the shard mutex**, so it was simultaneously a cost and a
+  lengthening of the critical section. That is why it appeared *beside* the lock rows
+  rather than instead of them;
+- `SstReader::Get` heap-allocated an `Iterator` for the index block, another for the data
+  block, and a wrapper to own them. None outlived the call.
+
+**The fixes.** Transparent (`is_transparent`) hash and equality so `find()` accepts a
+`std::string_view` and allocates nothing; `BlockKey` writing into a caller buffer; the cache
+`Entry` built *outside* the lock; the shard index recorded on the entry so `Release` need
+not re-hash; and a `Block::SeekTo` that runs the point lookup on a **stack-allocated**
+iterator.
+
+Result: **+41% throughput at 1 shard, p90 42 → 30 µs, and run-to-run spread from 24% down to
+1.4%.** That last figure is the one I would lead with — allocator contention was a large
+part of what made this benchmark noisy, and noise is what makes a tail-latency claim
+unfalsifiable.
+
+**Part 2 — the fix broke every lookup, in exactly the way B18 did.**
+
+First attempt at the stack-allocated path:
+
+```cpp
+bool Block::SeekTo(const Slice& target, Slice* key, Slice* value) const {
+  Iter it(...);              // on the stack
+  it.Seek(target);
+  *key = it.key();           // <-- points into it.key_, a std::string member
+  *value = it.value();
+  return true;               // ...and `it` is destroyed HERE
+}
+```
+
+4,000 test failures, immediately. `Block::Iter::key()` returns a `Slice` into the iterator's
+**own reconstructed key buffer** — it has to, because prefix compression means most keys do
+not exist contiguously in the block at all. Returning a `Slice` to it from a function whose
+iterator is a local is a dangling pointer by construction.
+
+This is **the same bug as B18**, which was about holding a `Slice` across a re-seek, and
+which I had written a full journal entry about. The lesson did not transfer because the
+*shape* was different: B18 was "a view outlives an iterator movement", this was "a view
+outlives an iterator's scope". Same root cause, different silhouette.
+
+**The fix, and why it is the right shape rather than a patch.** Out-parameters cannot express
+"valid only while the iterator lives", so the signature was wrong, not the code. `SeekTo`
+now takes a `Block::Visitor*` and calls `OnEntry(key, value)` **while the iterator is still
+alive**. The lifetime becomes obviously correct instead of subtly wrong, and the caller
+physically cannot hold the slice past its validity.
+
+**Generalizes to.** Three things.
+
+1. **A prediction about performance is a hypothesis, and profiling is how it gets tested.**
+   The spec marked its contention guess `ASSUMED` precisely so this could happen. It was
+   half right, and the half it missed was bigger than the half it got.
+2. **Allocation inside a critical section is two costs, not one**, and it disguises itself as
+   the lock. The profile showed lock and allocator symbols adjacent, and the natural reading
+   — "the lock is the problem" — would have led to more sharding rather than to the actual
+   fix.
+3. **When a lifetime cannot be expressed in a signature, change the signature.** I had
+   already written down B18's lesson and still reproduced it, because I was reasoning about
+   *whether the slice was valid* instead of *whether the API could be misused*. A visitor
+   callback makes the invalid usage unrepresentable; a comment saying "do not hold this"
+   would not have.
+
+---

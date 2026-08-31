@@ -117,6 +117,26 @@ TEST(everything_is_freed_at_destruction) {
   CHECK_EQ(g_deleted.load(), 100);
 }
 
+TEST(block_keys_are_built_without_allocating) {
+  // T12's fix. BlockKey used to return a std::string -- a heap allocation on every block
+  // access, on the hot read path. It now writes into a caller buffer.
+  char a[Cache::kBlockKeySize], b[Cache::kBlockKeySize];
+  const Slice k1 = Cache::BlockKey(a, 7, 4096);
+  const Slice k2 = Cache::BlockKey(b, 7, 4096);
+  CHECK_EQ(k1.size(), Cache::kBlockKeySize);
+  CHECK(k1 == k2);                                     // same inputs, same key
+  const Slice k3 = Cache::BlockKey(b, 7, 8192);
+  CHECK(!(k1 == k3));                                  // different offset, different key
+  const Slice k4 = Cache::BlockKey(b, 8, 4096);
+  CHECK(!(k1 == k4));                                  // different file, different key
+  // A collision here would return the WRONG BLOCK for a lookup, so the encoding is checked
+  // to be injective over the two fields rather than merely "looks different": file number
+  // occupies bytes 0..7 and offset bytes 8..15, so k1 and k4 (same offset, different file)
+  // must share the SECOND half and differ in the first.
+  CHECK_EQ(std::memcmp(a + 8, b + 8, 8), 0);
+  CHECK_NE(std::memcmp(a, b, 8), 0);
+}
+
 TEST(shards_partition_the_keyspace_and_the_total_capacity) {
   // The 16-shard cache must not be SMALLER than the 1-shard cache of the same nominal
   // size, or T12's comparison would be measuring two different caches rather than two

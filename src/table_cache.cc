@@ -73,10 +73,11 @@ TableCache::~TableCache() = default;
 
 Status TableCache::Get(uint64_t file_number, uint64_t file_size, SstReader** reader,
                        Cache::Handle** handle) {
-  std::string key;
-  PutFixed64(&key, file_number);
+  char keybuf[8];
+  EncodeFixed64(keybuf, file_number);
+  const Slice key(keybuf, sizeof(keybuf));
 
-  if (Cache::Handle* h = cache_.Lookup(Slice(key))) {
+  if (Cache::Handle* h = cache_.Lookup(key)) {
     *handle = h;
     *reader = static_cast<CachedReader*>(cache_.Value(h))->reader.get();
     return Status::OK();
@@ -102,7 +103,7 @@ Status TableCache::Get(uint64_t file_number, uint64_t file_size, SstReader** rea
            : 0);
   cr->reader = std::move(r);
   *reader = cr->reader.get();
-  *handle = cache_.Insert(Slice(key), cr, charge, &DeleteCachedReader);
+  *handle = cache_.Insert(key, cr, charge, &DeleteCachedReader);
   if (stats_) stats_->Set(kFilterBytesResident, ResidentFilterBytes());
   return Status::OK();
 }
@@ -110,9 +111,9 @@ Status TableCache::Get(uint64_t file_number, uint64_t file_size, SstReader** rea
 void TableCache::Release(Cache::Handle* handle) { if (handle) cache_.Release(handle); }
 
 void TableCache::Evict(uint64_t file_number) {
-  std::string key;
-  PutFixed64(&key, file_number);
-  cache_.Erase(Slice(key));
+  char keybuf[8];
+  EncodeFixed64(keybuf, file_number);
+  cache_.Erase(Slice(keybuf, sizeof(keybuf)));
 }
 
 size_t TableCache::ResidentFilterBytes() const { return cache_.TotalCharge(); }

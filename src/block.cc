@@ -205,6 +205,17 @@ class Block::Iter final : public Iterator {
   Status status_;
 };
 
+bool Block::SeekTo(const Slice& target, Visitor* visitor) const {
+  if (corrupt_) return false;
+  Iter it(data_.data(), restart_offset_, num_restarts_);   // ON THE STACK -- no allocation
+  it.Seek(target);
+  if (!it.Valid()) return false;
+  // Called HERE, while `it` is alive: it.key() points into the iterator's own reconstructed
+  // key buffer, which dies with the iterator.
+  visitor->OnEntry(it.key(), it.value());
+  return true;
+}
+
 Iterator* Block::NewIterator() const {
   if (corrupt_) return NewErrorIterator(Status::Corruption("malformed block trailer"));
   return new Iter(data_.data(), restart_offset_, num_restarts_);

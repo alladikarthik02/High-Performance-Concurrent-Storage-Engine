@@ -1,5 +1,7 @@
 #include "lsmeng/cache.h"
 
+#include <string_view>
+
 #include "lsmeng/coding.h"
 
 namespace lsmeng {
@@ -55,31 +57,27 @@ void Cache::Shard::EvictIfNeeded() {
   }
 }
 
-Cache::Handle* Cache::Shard::Insert(const Slice& key, void* value, size_t charge,
-                                    void (*deleter)(void*)) {
+// The Entry -- including its key string, the only allocation here -- is built by the
+// caller OUTSIDE the lock. All this does under the mutex is hash-table and list surgery.
+Cache::Handle* Cache::Shard::Insert(Entry* e) {
   std::lock_guard<std::mutex> g(mu_);
 
   // An existing entry for this key is evicted first. Two threads can legitimately race to
   // insert the same block -- the accepted stampede of E-12 -- and the later one wins.
-  auto it = table_.find(key.ToString());
+  auto it = table_.find(std::string_view(e->key));
   if (it != table_.end()) {
     Entry* old = it->second;
     RemoveFromTable(old);
     if (old->refs == 0) { if (old->deleter) old->deleter(old->value); delete old; }
   }
 
-  Entry* e = new Entry();
-  e->key = key.ToString();
-  e->value = value;
-  e->charge = charge;
-  e->deleter = deleter;
   e->refs = 2;          // one for the cache, one for the handle we return
   e->in_cache = true;
 
   lru_.push_back(e);
   e->lru_pos = std::prev(lru_.end());
   table_[e->key] = e;
-  usage_ += charge;
+  usage_ += e->charge;
 
   EvictIfNeeded();
   return Cache::ToHandle(e);
@@ -87,7 +85,8 @@ Cache::Handle* Cache::Shard::Insert(const Slice& key, void* value, size_t charge
 
 Cache::Handle* Cache::Shard::Lookup(const Slice& key) {
   std::lock_guard<std::mutex> g(mu_);
-  auto it = table_.find(key.ToString());
+  // Heterogeneous lookup: no allocation, and therefore a shorter critical section.
+  auto it = table_.find(std::string_view(key.data(), key.size()));
   if (it == table_.end()) return nullptr;
   Entry* e = it->second;
   ++e->refs;
@@ -106,7 +105,7 @@ void Cache::Shard::Release(Entry* e) {
 
 void Cache::Shard::Erase(const Slice& key) {
   std::lock_guard<std::mutex> g(mu_);
-  auto it = table_.find(key.ToString());
+  auto it = table_.find(std::string_view(key.data(), key.size()));
   if (it == table_.end()) return;
   Entry* e = it->second;
   RemoveFromTable(e);
@@ -127,12 +126,22 @@ Cache::~Cache() = default;
 
 Cache::Handle* Cache::Insert(const Slice& key, void* value, size_t charge,
                              void (*deleter)(void*)) {
-  return ShardFor(key)->Insert(key, value, charge, deleter);
+  const size_t shard = ShardIndexFor(key);
+  // Built here, outside the lock, so the one unavoidable allocation is not serialised.
+  auto* e = new Entry();
+  e->key.assign(key.data(), key.size());
+  e->value = value;
+  e->charge = charge;
+  e->deleter = deleter;
+  e->shard = static_cast<int>(shard);
+  return shards_[shard].Insert(e);
 }
 Cache::Handle* Cache::Lookup(const Slice& key) { return ShardFor(key)->Lookup(key); }
 void Cache::Release(Handle* h) {
   Entry* e = ToEntry(h);
-  ShardFor(Slice(e->key))->Release(e);
+  // The shard index is recorded on the entry, so a Release does not re-hash the key. That
+  // is once per Get on the hot read path.
+  shards_[static_cast<size_t>(e->shard)].Release(e);
 }
 void* Cache::Value(Handle* h) { return ToEntry(h)->value; }
 void Cache::Erase(const Slice& key) { ShardFor(key)->Erase(key); }
@@ -148,11 +157,10 @@ size_t Cache::NumEntries() const {
   return n;
 }
 
-std::string Cache::BlockKey(uint64_t file_number, uint64_t offset) {
-  std::string k;
-  PutFixed64(&k, file_number);
-  PutFixed64(&k, offset);
-  return k;
+Slice Cache::BlockKey(char* buf, uint64_t file_number, uint64_t offset) {
+  EncodeFixed64(buf, file_number);
+  EncodeFixed64(buf + 8, offset);
+  return Slice(buf, kBlockKeySize);
 }
 
 }  // namespace lsmeng

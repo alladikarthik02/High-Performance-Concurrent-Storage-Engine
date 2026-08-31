@@ -23,19 +23,35 @@ Résumé project #3 of the Pure Storage set (after `dedupe` and `wanrep`).
 | **T9** | read path — merging iterator, snapshots, **model test green** | done |
 | **T10** | tiered compaction — the four spec-review fixes | done |
 | **T11** | histogram, benchmark harness, measured numbers | done |
-| **T12** | profiling pass (`perf`, cachegrind, helgrind, massif) + `RESUME.md` | **in progress** — see `docs/T12-NOTES.md` |
+| **T12** | profiling pass (`perf`, cachegrind, helgrind, DRD, massif) + `RESUME.md` | done |
 
 **22 test binaries, green in all three configurations** (plain, ASan+UBSan, TSan).
+
+**All 13 tasks complete.**
 
 ### Headline measurements (`docs/BENCHMARKS.md`)
 
 - **Group commit:** 6.9× throughput from 1→16 threads with `sync=true`, while the fsync
   count *falls* 8.5×. At 1 thread: **99.6% of a raw-append-plus-fsync floor**, with a full
   sorted index.
-- **Bloom filters:** 2.4× throughput and **38× fewer data blocks read** for absent keys.
-- **Cache sharding:** 1.58× throughput, **2.9× better p90** (29 µs → 10 µs).
-- **Model test:** 30,000 random ops against a `std::map` reference — 601 flushes, 583
-  reopens, 1,181 forward+reverse scans, zero mismatches.
+- **Bloom filters:** 2.4× throughput and **38× fewer data blocks read** for absent keys;
+  measured FPR 0.836% against 0.82% theory.
+- **Contention removed, twice:** cache sharding (1.58× throughput, p90 29→10 µs), then —
+  found by reading a profile — **allocation, which cost more than lock contention**
+  (+41% throughput, p90 42→30 µs, run-to-run spread 24%→1.4%).
+- **Model test:** 30,000 random ops against a `std::map` reference — 299 compactions, 592
+  reopens, 1,183 forward+reverse scans, **zero mismatches**.
+- **helgrind, DRD: 0 errors** on a live database. **massif: peak heap 11.55 MiB** against a
+  12 MiB declared budget.
+
+### The documents
+
+| | |
+|---|---|
+| [`docs/RESUME.md`](docs/RESUME.md) | **every résumé phrase mapped to the measurement that earns it** — read this before an interview |
+| [`docs/SPEC.md`](docs/SPEC.md) | the design, plus §11: 21 defects found by attacking v1 on purpose |
+| [`docs/CHALLENGES.md`](docs/CHALLENGES.md) | the bug journal — C1–C3 design phase, B1–B21 build phase |
+| [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | every number, with its command line |
 
 ## Documents
 

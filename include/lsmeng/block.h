@@ -67,6 +67,31 @@ class Block {
 
   Iterator* NewIterator() const;
 
+  // Receives the entry a point lookup lands on.
+  //
+  // WHY A VISITOR AND NOT OUT-PARAMETERS. The obvious signature --
+  // `bool SeekTo(target, Slice* key, Slice* value)` -- is WRONG, and I wrote it first. The
+  // block iterator reconstructs each key into its OWN std::string buffer (prefix
+  // compression means most keys do not exist contiguously in the block at all), so a Slice
+  // to the key dangles the moment a stack-allocated iterator goes out of scope. The
+  // visitor is called while the iterator is still alive, which makes the lifetime
+  // obviously correct instead of subtly wrong. See CHALLENGES B21.
+  //
+  // `key` and `value` are valid ONLY for the duration of the call.
+  class Visitor {
+   public:
+    virtual ~Visitor() = default;
+    virtual void OnEntry(const Slice& key, const Slice& value) = 0;
+  };
+
+  // A point lookup that allocates NOTHING: the iterator lives on the stack.
+  //
+  // T12's profile: after removing the cache's per-lookup string, ALLOCATION was still the
+  // largest single cost group (15.7% of cycles at 16 shards) -- on a cache HIT the read
+  // path was doing three heap allocations per Get, for two `Iterator` objects and the
+  // wrapper owning them, none of which outlive the call.
+  bool SeekTo(const Slice& target, Visitor* visitor) const;
+
  private:
   class Iter;
   Slice data_;

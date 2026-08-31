@@ -172,6 +172,17 @@ Status SstBuilder::Finish() {
 
 // ---------------------------------------------------------------- SstReader
 
+namespace {
+// What a cached block owns: the decoded Block and the bytes it points into. They are freed
+// together, by the cache, when the last reference goes away.
+struct CachedBlock {
+  std::string contents;
+  std::unique_ptr<Block> block;
+};
+void DeleteCachedBlock(void* v) { delete static_cast<CachedBlock*>(v); }
+}  // namespace
+
+
 Status SstReader::ReadBlock(const BlockHandle& handle, bool verify, std::string* out) const {
   out->resize(handle.size + kBlockTrailerSize);
   Slice got;
@@ -233,14 +244,6 @@ Status SstReader::Open(const Options& options, std::unique_ptr<RandomAccessFile>
 }
 
 namespace {
-// What a cached block owns: the decoded Block and the bytes it points into. They are freed
-// together, by the cache, when the last reference goes away.
-struct CachedBlock {
-  std::string contents;
-  std::unique_ptr<Block> block;
-};
-void DeleteCachedBlock(void* v) { delete static_cast<CachedBlock*>(v); }
-
 // Wraps a block iterator so that releasing the cache handle (or deleting an uncached
 // block) happens exactly when the iterator dies. Getting this wrong is a use-after-free
 // that only appears under eviction pressure.
@@ -272,6 +275,50 @@ class BlockOwningIterator final : public Iterator {
 };
 }  // namespace
 
+// The allocation-free half of the read path (T12 / CHALLENGES B21). Identical caching
+// behaviour to BlockIterator, but hands back the Block itself rather than an iterator, so
+// a point lookup can search it on the stack.
+struct SstReader::BlockRef {
+  const Block* block = nullptr;
+  Cache::Handle* cache_handle = nullptr;   // non-null => release via the cache
+  CachedBlock* owned = nullptr;            // non-null => delete it
+};
+
+Status SstReader::FetchBlock(const BlockHandle& handle, BlockRef* out) const {
+  if (block_cache_ != nullptr) {
+    char keybuf[Cache::kBlockKeySize];
+    const Slice key = Cache::BlockKey(keybuf, file_number_, handle.offset);
+    if (Cache::Handle* h = block_cache_->Lookup(key)) {
+      if (stats_) stats_->Add(kCacheHits, 1);
+      auto* cb = static_cast<CachedBlock*>(block_cache_->Value(h));
+      out->block = cb->block.get();
+      out->cache_handle = h;
+      return Status::OK();
+    }
+    if (stats_) stats_->Add(kCacheMisses, 1);
+  }
+
+  auto cb = std::make_unique<CachedBlock>();
+  Status s = ReadBlock(handle, options_.paranoid_checks, &cb->contents);
+  if (!s.ok()) return s;
+  if (stats_) stats_->Add(kBlocksRead, 1);
+  cb->block.reset(new Block(Slice(cb->contents)));
+  if (!cb->block->ok()) return Status::Corruption("malformed data block");
+
+  if (block_cache_ != nullptr) {
+    char keybuf[Cache::kBlockKeySize];
+    const Slice key = Cache::BlockKey(keybuf, file_number_, handle.offset);
+    CachedBlock* raw = cb.release();
+    out->block = raw->block.get();
+    out->cache_handle = block_cache_->Insert(key, raw, raw->contents.size() + sizeof(CachedBlock),
+                                             &DeleteCachedBlock);
+    return Status::OK();
+  }
+  out->owned = cb.release();
+  out->block = out->owned->block.get();
+  return Status::OK();
+}
+
 Iterator* SstReader::BlockIterator(const Slice& index_value) const {
   BlockHandle handle;
   Slice input = index_value;
@@ -279,8 +326,9 @@ Iterator* SstReader::BlockIterator(const Slice& index_value) const {
   if (!s.ok()) return NewErrorIterator(s);
 
   if (block_cache_ != nullptr) {
-    const std::string key = Cache::BlockKey(file_number_, handle.offset);
-    if (Cache::Handle* h = block_cache_->Lookup(Slice(key))) {
+    char keybuf[Cache::kBlockKeySize];
+    const Slice key = Cache::BlockKey(keybuf, file_number_, handle.offset);
+    if (Cache::Handle* h = block_cache_->Lookup(key)) {
       if (stats_) stats_->Add(kCacheHits, 1);
       auto* cb = static_cast<CachedBlock*>(block_cache_->Value(h));
       return new BlockOwningIterator(cb->block->NewIterator(), block_cache_, h, nullptr);
@@ -301,9 +349,10 @@ Iterator* SstReader::BlockIterator(const Slice& index_value) const {
   if (!cb->block->ok()) return NewErrorIterator(Status::Corruption("malformed data block"));
 
   if (block_cache_ != nullptr) {
-    const std::string key = Cache::BlockKey(file_number_, handle.offset);
+    char keybuf[Cache::kBlockKeySize];
+    const Slice key = Cache::BlockKey(keybuf, file_number_, handle.offset);
     CachedBlock* raw = cb.release();
-    Cache::Handle* h = block_cache_->Insert(Slice(key), raw,
+    Cache::Handle* h = block_cache_->Insert(key, raw,
                                             raw->contents.size() + sizeof(CachedBlock),
                                             &DeleteCachedBlock);
     return new BlockOwningIterator(raw->block->NewIterator(), block_cache_, h, nullptr);
@@ -319,6 +368,51 @@ uint32_t SstReader::NumDataBlocks() const {
   return n;
 }
 
+namespace {
+// Decodes the BlockHandle out of an index entry, while the index iterator is still alive.
+class IndexVisitor final : public Block::Visitor {
+ public:
+  BlockHandle handle;
+  Status status = Status::Corruption("index entry not visited");
+  void OnEntry(const Slice&, const Slice& value) override {
+    Slice input = value;
+    status = handle.DecodeFrom(&input);
+  }
+};
+
+// Resolves the entry a data-block lookup landed on, while that iterator is still alive.
+class PointVisitor final : public Block::Visitor {
+ public:
+  PointVisitor(const Slice& user_key, std::string* value, bool* tombstone)
+      : user_key_(user_key), value_(value), tombstone_(tombstone) {}
+  Status result = Status::NotFound(Slice());
+
+  void OnEntry(const Slice& key, const Slice& value) override {
+    ParsedInternalKey parsed;
+    if (!ParseInternalKey(key, &parsed)) {
+      result = Status::Corruption("malformed internal key in SST");
+      return;
+    }
+    if (parsed.user_key.compare(user_key_) != 0) return;   // genuinely absent from this file
+    if (parsed.type == kTypeDeletion) {
+      // A hit that is a delete. The caller must STOP here rather than continue to older
+      // files, or the read resurrects the value this tombstone hides (SPEC 3.7, E-2).
+      *tombstone_ = true;
+      return;
+    }
+    // Copied here, not returned as a Slice: `value` points into the block, and the block
+    // may be released the moment this call returns.
+    value_->assign(value.data(), value.size());
+    result = Status::OK();
+  }
+
+ private:
+  Slice user_key_;
+  std::string* value_;
+  bool* tombstone_;
+};
+}  // namespace
+
 Status SstReader::Get(const ReadOptions& options, const Slice& internal_key,
                       std::string* value, bool* found_tombstone) const {
   *found_tombstone = false;
@@ -332,28 +426,22 @@ Status SstReader::Get(const ReadOptions& options, const Slice& internal_key,
     }
   }
 
-  std::unique_ptr<Iterator> index_iter(index_block_->NewIterator());
-  index_iter->Seek(internal_key);
-  if (!index_iter->Valid()) return Status::NotFound(Slice());
+  // NO HEAP ALLOCATION FROM HERE ON A CACHE HIT. Both searches run on stack iterators; the
+  // only thing that outlives this function is the caller's `value` string.
+  IndexVisitor index;
+  if (!index_block_->SeekTo(internal_key, &index)) return Status::NotFound(Slice());
+  if (!index.status.ok()) return index.status;
 
-  std::unique_ptr<Iterator> block_iter(BlockIterator(index_iter->value()));
-  block_iter->Seek(internal_key);
-  if (!block_iter->Valid()) return block_iter->status().ok() ? Status::NotFound(Slice())
-                                                             : block_iter->status();
+  BlockRef ref;
+  Status s = FetchBlock(index.handle, &ref);
+  if (!s.ok()) return s;
 
-  ParsedInternalKey parsed;
-  if (!ParseInternalKey(block_iter->key(), &parsed))
-    return Status::Corruption("malformed internal key in SST");
-  if (parsed.user_key.compare(user_key) != 0) return Status::NotFound(Slice());
+  PointVisitor point(user_key, value, found_tombstone);
+  ref.block->SeekTo(internal_key, &point);
 
-  if (parsed.type == kTypeDeletion) {
-    // A hit that is a delete. The caller must STOP here rather than continue to older
-    // files, or the read resurrects the value this tombstone hides (SPEC 3.7, E-2).
-    *found_tombstone = true;
-    return Status::NotFound(Slice());
-  }
-  value->assign(block_iter->value().data(), block_iter->value().size());
-  return Status::OK();
+  if (ref.cache_handle) block_cache_->Release(ref.cache_handle);
+  delete ref.owned;
+  return point.result;
 }
 
 Iterator* SstReader::NewIterator(const ReadOptions& options) const {
