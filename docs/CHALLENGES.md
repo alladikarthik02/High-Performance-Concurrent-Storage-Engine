@@ -23,7 +23,7 @@ of the work that was actually hard.
 
 ## C1 🔬📐 The project was believed to already exist — it was a 66-line wrapper over RocksDB
 
-**Symptom.** Before any work started, the question was whether résumé project #3
+**Symptom.** Before any work started, the question was whether project #3
 ("High-Performance Concurrent Storage Engine") was the same thing as an existing
 `Key_Value_Store_project_1`. Both descriptions contain the words *LSM-tree*, *write-ahead
 log*, *Bloom filters*, and *compaction*. On a keyword match they are the same project.
@@ -44,15 +44,15 @@ settled it:
   `NewBloomFilterPolicy(10)`.
 - "Tiered compaction" is one call: `opt.OptimizeLevelStyleCompaction()`.
 
-Then the concurrency half of the bullet: `grep` showed `ThreadPool` and `HashRing` are
+Then the concurrency half of the claim: `grep` showed `ThreadPool` and `HashRing` are
 **never referenced outside their own files** — dead code. There is no locking anywhere in
 the storage path, because RocksDB is internally synchronized and there was nothing to
 make fine-grained. `benchmark.cpp` is 38 lines, hammers one hardcoded key, `detach()`es
 its threads, and reports only ops/sec — **no latency measurement at all**, which is the
-one number the résumé's tail-latency claim depends on.
+one number the tail-latency claim depends on.
 
 **Root cause.** Not a code defect — a **planning defect, and a vocabulary trap.** The KV
-store *uses* an LSM tree; the résumé bullet claims it *builds* one. Those are different
+store *uses* an LSM tree; the claim says it *builds* one. Those are different
 sentences that share every noun. Where the LSM concepts live is the whole question, and
 in that project every one of them lives inside a dependency.
 
@@ -67,7 +67,7 @@ is. This project builds the engine, from scratch, which is why §1.1 of the spec
 use the same nouns, the question to ask is not "does this project involve X?" but "**if
 I deleted the dependency, would X still be here?**" For the KV store the answer was no
 for every one of the four nouns. That single question is faster than any code review and
-it is the one an interviewer will ask, in the form "walk me through your SST block
+it is the one a reviewer will ask, in the form "walk me through your SST block
 format."
 
 ---
@@ -108,7 +108,7 @@ edge-case inventory, and a section explaining why each design choice was correct
 also wrong in four places in ways that would have lost or silently corrupted data.
 
 **How I isolated it.** Six independent adversarial reviews, each given one lens
-(durability, concurrency, LSM design, scope/API, testability, résumé honesty) and one
+(durability, concurrency, LSM design, scope/API, testability, claim honesty) and one
 instruction: *break it, do not approve it*. Every finding was then handed to a skeptic
 told to **refute** it and to default to "already covered" when uncertain.
 
@@ -435,7 +435,7 @@ prediction:
 **Generalizes to.** **A benchmark result that is better than physics allows is a bug
 report about the benchmark.** The instinct on seeing a surprisingly good number should be
 to ask what work is not being done, not to write it down. That instinct is the difference
-between a résumé number that survives questioning and one that does not.
+between a headline number that survives questioning and one that does not.
 
 ---
 
@@ -460,10 +460,10 @@ actually needs), and **cachegrind** for cache behaviour, which *simulates* a cac
 of reading counters and is therefore immune to the missing PMU. Arguably the better tool
 here regardless.
 
-**Generalizes to.** The résumé says "profiling with perf and Valgrind." That claim now
+**Generalizes to.** The claim says "profiling with perf and Valgrind." That claim now
 means `perf record -e cpu-clock` and a named set of Valgrind tools, with the limitation
 written down — rather than a claim backed by a tool that printed `<not supported>`. Being
-able to say *why* the counters are missing, unprompted, is worth more in an interview than
+able to say *why* the counters are missing, unprompted, is worth more in a design review than
 having had them.
 
 ---
@@ -651,7 +651,7 @@ correct answer.
 demands a non-EOF reason only when the truncation point falls *strictly inside* a record.
 
 **Why I am keeping a test bug in this journal.** Because the underlying property is one an
-interviewer can reasonably probe — *"how does recovery know the log ended cleanly rather
+reviewer can reasonably probe — *"how does recovery know the log ended cleanly rather
 than being cut off?"* — and the honest answer is: **at a record boundary it does not know,
 and it does not need to.** Durability is not "detect every truncation"; it is "never
 return a record that was not fully written." A `sync=false` tail that vanishes at a

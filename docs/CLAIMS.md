@@ -1,14 +1,14 @@
-# `lsmeng` — résumé bullets mapped to evidence
+# `lsmeng` — claims mapped to evidence
 
-The two bullets, phrase by phrase, each against the thing that earns it. Every number here
+Each claim, phrase by phrase, each against the thing that earns it. Every number here
 appears in `docs/BENCHMARKS.md` with the command line that produced it.
 
 **The rule this document exists to enforce:** if a phrase has no measurement, the phrase
-gets rewritten. The résumé follows the code, not the other way around.
+gets rewritten. The claims follow the code, not the other way around.
 
 ---
 
-## Bullet 1
+## Claim 1
 
 > *"Built a C++ storage engine using an LSM-tree design with a write-ahead log for
 > durability, sustaining high write throughput while keeping reads fast through Bloom
@@ -64,7 +64,7 @@ record with wrong contents is ever returned.
 
 ### "sustaining high write throughput"
 
-**High compared to what** — the question an interviewer asks, answered in advance with
+**High compared to what** — the question a reviewer asks, answered in advance with
 three baselines (`SPEC §2.1`).
 
 | threads (`sync=true`) | ops/s | fsyncs | **writes per fsync** |
@@ -138,7 +138,7 @@ ordering invariant.
 
 ---
 
-## Bullet 2
+## Claim 2
 
 > *"Optimized the concurrent path with fine-grained locking and benchmarked it under
 > multithreaded load, profiling with perf and Valgrind to remove contention and reduce
@@ -296,7 +296,7 @@ Volunteering the limits is what makes the claims above credible.
 - **No block compression**, no secondary indexes, no cross-key transactions beyond a batch,
   one process per directory.
 
-## The documents worth reading before an interview
+## The documents worth reading before a design review
 
 | | |
 |---|---|

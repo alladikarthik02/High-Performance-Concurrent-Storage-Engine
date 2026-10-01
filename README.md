@@ -5,8 +5,6 @@ log, memtable, SST format, Bloom filter, tiered compaction, crash-consistent man
 sharded block cache. No RocksDB, no LevelDB, no third-party libraries at all — the only
 things linked are libstdc++ and pthreads.
 
-Résumé project #3 of the Pure Storage set (after `dedupe` and `wanrep`).
-
 ## Status
 
 | Task | | |
@@ -23,7 +21,7 @@ Résumé project #3 of the Pure Storage set (after `dedupe` and `wanrep`).
 | **T9** | read path — merging iterator, snapshots, **model test green** | done |
 | **T10** | tiered compaction — the four spec-review fixes | done |
 | **T11** | histogram, benchmark harness, measured numbers | done |
-| **T12** | profiling pass (`perf`, cachegrind, helgrind, DRD, massif) + `RESUME.md` | done |
+| **T12** | profiling pass (`perf`, cachegrind, helgrind, DRD, massif) + `CLAIMS.md` | done |
 
 **22 test binaries, green in all three configurations** (plain, ASan+UBSan, TSan).
 
@@ -48,7 +46,7 @@ Résumé project #3 of the Pure Storage set (after `dedupe` and `wanrep`).
 
 | | |
 |---|---|
-| [`docs/RESUME.md`](docs/RESUME.md) | **every résumé phrase mapped to the measurement that earns it** — read this before an interview |
+| [`docs/CLAIMS.md`](docs/CLAIMS.md) | **every claim mapped to the measurement that earns it** — read this before a design review |
 | [`docs/SPEC.md`](docs/SPEC.md) | the design, plus §11: 21 defects found by attacking v1 on purpose |
 | [`docs/CHALLENGES.md`](docs/CHALLENGES.md) | the bug journal — C1–C3 design phase, B1–B21 build phase |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | every number, with its command line |

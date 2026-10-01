@@ -1,6 +1,6 @@
 // T2: the Bloom filter. SPEC 3.6, R6.
 //
-// The headline test MEASURES the false-positive rate against theory. R6's résumé phrase
+// The headline test MEASURES the false-positive rate against theory. R6's claim
 // ("keeping reads fast through Bloom filters") is only earned by a number, and a filter
 // whose FPR is 10x theory is still *correct* -- it just does nothing. Correctness tests
 // alone cannot tell those apart, which is why the measurement is the point.

@@ -45,8 +45,7 @@ container, GCC 13. 8 CPUs visible to the container.
 `MEASURED`. **§10.4's prediction was correct**: no PMU is exposed through the LinuxKit VM,
 so hardware events are unavailable and `perf lock` is out. The software `cpu-clock` event
 works and gives a real wall-clock sampling profile. T12 therefore uses `perf record -e
-cpu-clock` plus cachegrind (a *simulator*, immune to the missing PMU) — and R11's résumé
-phrase is backed by a tool that actually produced output, not one that printed
+cpu-clock` plus cachegrind (a *simulator*, immune to the missing PMU) — and R11's claim is backed by a tool that actually produced output, not one that printed
 `<not supported>`.
 
 ---

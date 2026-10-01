@@ -1,9 +1,9 @@
 # `lsmeng` — Technical Specification
 
-**Project #3 of the Pure Storage résumé: "High-Performance Concurrent Storage Engine".**
+**Project: "High-Performance Concurrent Storage Engine".**
 
 **Version 2.** Version 1 was attacked from six adversarial angles — durability,
-concurrency, LSM design, scope/API, testability, and résumé honesty. 36 defects were
+concurrency, LSM design, scope/API, testability, and claim honesty. 36 defects were
 raised, 23 were refuted on a careful re-read, and **21 survived and are fixed in this
 document**. §11 records every one, with the v1 text that was wrong. Four of them were
 silent-data-loss bugs.
@@ -14,7 +14,7 @@ Status: specification complete, implementation not started.
 
 ## 0. How to read this document
 
-This is the document to re-read before an interview, and after finishing every task.
+This is the document to re-read before a design review, and after finishing every task.
 It has four jobs:
 
 1. **§1–§3** say what is being built and how it works, in enough detail that the design
@@ -60,10 +60,10 @@ scratch, whose on-disk structure is a **log-structured merge tree**.
 **Zero third-party libraries in the engine or its tests.** No RocksDB, no LevelDB, no
 Snappy, no gtest, no Abseil. The only things linked are libstdc++ and pthreads.
 
-The reason is not purity. The résumé bullet says *"Built a C++ storage engine using an
+The reason is not purity. The claim says *"Built a C++ storage engine using an
 LSM-tree design with a write-ahead log … Bloom filters and a tiered compaction
 strategy."* If those four things belong to a library, that sentence is not true, and an
-interviewer who asks "what is your SST block format?" gets an answer about somebody
+reviewer who asks "what is your SST block format?" gets an answer about somebody
 else's code. **This project exists so that the answer is ours.**
 
 This is not hypothetical. The earlier `Key_Value_Store_project_1` was a 66-line
@@ -95,9 +95,9 @@ was found with a profiler and removed.*
 
 ---
 
-## 2. Résumé bullets → testable requirements (the contract)
+## 2. Claims → testable requirements (the contract)
 
-### Bullet 1
+### Claim 1
 
 > *"Built a C++ storage engine using an LSM-tree design with a write-ahead log for
 > durability, sustaining high write throughput while keeping reads fast through Bloom
@@ -113,7 +113,7 @@ was found with a profiler and removed.*
 | R6 | "keeping reads fast through Bloom filters" | Own Bloom implementation; **measured** FPR vs theory; **measured** reduction in data blocks read per `Get`, with filter-block reads counted separately and honestly | T2, T11 |
 | R7 | "a tiered compaction strategy" | Tiered compaction: the **T oldest** files of a tier merge into one file in the next tier, with tier count bounded by `max_tiers`. Read amplification **measured** as tiers grow, on an overwrite workload as well as an insert-only one | T10, T11 |
 
-### Bullet 2
+### Claim 2
 
 > *"Optimized the concurrent path with fine-grained locking and benchmarked it under
 > multithreaded load, profiling with perf and Valgrind to remove contention and reduce
@@ -132,10 +132,10 @@ was found with a profiler and removed.*
 
 Every one of R5, R6, R7, R11, R12, R13 needs a number measured on this machine.
 `docs/BENCHMARKS.md` holds them with the command line that produced each. A number
-without its command line does not go in. **If a number cannot be produced, the résumé
-phrase is rewritten — the résumé follows the code.**
+without its command line does not go in. **If a number cannot be produced, the claim
+is rewritten — the claims follow the code.**
 
-"High" and "fast" are comparatives and need a *comparand*, or an interviewer will supply
+"High" and "fast" are comparatives and need a *comparand*, or a reviewer will supply
 one. Three baselines, all measurable here:
 
 - **B-null** — `write()` + `fsync()` of the same bytes to a flat file, no index, no
@@ -150,7 +150,7 @@ one. Three baselines, all measurable here:
 
 **We do not benchmark against RocksDB and claim victory.** A 2 kLOC engine beating a
 mature one would mean the workload was rigged, and saying so unprompted is worth more in
-an interview than any number.
+a review than any number.
 
 ---
 
@@ -634,7 +634,7 @@ rather than hidden inside the win (R6).
 
 ### 3.8 Compaction: tiered
 
-The résumé says *tiered*, so this is tiered, not leveled, and the difference is something
+The claim says *tiered*, so this is tiered, not leveled, and the difference is something
 to be able to explain:
 
 | | Tiered (ours) | Leveled |
@@ -646,7 +646,7 @@ to be able to explain:
 | Read amplification | **high** (every file in a tier may be checked) | low (one file per level) |
 | Space amplification | high — measured steady state on an overwrite workload (T11); the transient ~2× of one compaction (E-27) is the smaller half of the cost |  low |
 
-We chose the write-optimised end, coherent with a bullet whose headline is write
+We chose the write-optimised end, coherent with a claim whose headline is write
 throughput. "We picked the one with worse read amplification, and here is the number" is a
 stronger answer than pretending there is no cost.
 
@@ -683,7 +683,7 @@ selection criterion — an important distinction, because `Flush()`, recovery fl
 and batch-boundary freezes all produce arbitrary-size tier-0 files, so "similarly sized" is
 never something to rely on.
 
-**Honest limitation, stated because an interviewer will find it.** This is count-triggered
+**Honest limitation, stated because a reviewer will find it.** This is count-triggered
 tiering with an oldest-prefix rule. It is *not* Cassandra-style STCS, which buckets files by
 size ratio and compacts a bucket wherever its members live. Under a workload that overwrites
 a small key set forever, every merge output is about the size of its inputs, so equally
@@ -1538,7 +1538,7 @@ is written. **Two forward dependencies remain, and are stated rather than hidden
 | **T9** | Read path: full `Get`, merging iterator, snapshots + `SnapshotHandle`, `Scan`, `lsmeng_cli` (`put/get/del/scan/props`) | **Randomized model test green** on the op mix minus `CompactRange` — the milestone that matters most; layer-4 crash test re-run with the full-scan assertion |
 | **T10** | Tiered compaction: oldest-prefix selection, both drop rules, `max_tiers`, stalls, `CompactRange` | Model test green on the **full** op mix; all five E-2 resurrection cases; E-30 partial-tier case; `test_compaction_reclaims.cpp` (E-33); no deadlock under stress; compaction/stall counters live |
 | **T11** | Benchmarks + histogram + workloads + open-loop protocol; `BENCHMARKS.md` | R5/R6/R7/R10 numbers exist with their command lines and their baselines (§2.1) |
-| **T12** | Profiling: `perf`, cachegrind/callgrind, helgrind, massif. Find one contention point, fix it, measure again | R11/R12/R13 have before/after numbers **and the mechanism**; `docs/RESUME.md` maps bullets → evidence |
+| **T12** | Profiling: `perf`, cachegrind/callgrind, helgrind, massif. Find one contention point, fix it, measure again | R11/R12/R13 have before/after numbers **and the mechanism**; `docs/CLAIMS.md` maps claims → evidence |
 
 **Deliberately deferred:** benchmarking (T11) comes *after* correctness (T9, T10). Optimising
 an engine that returns wrong answers is the most common way to waste a week, and a fast wrong
@@ -1633,7 +1633,7 @@ to report `<not supported>`, and `perf lock` needs kernel lock events that are n
   at anyway.
 
 If a Linux host with a real PMU is available, hardware numbers are taken there and labelled
-with the machine. **What will not happen is a résumé claim backed by a tool that printed
+with the machine. **What will not happen is a claim backed by a tool that printed
 `<not supported>`.**
 
 **Valgrind.** memcheck (leaks, S19) · helgrind and DRD (races and lock-order inversions, as a
@@ -1647,7 +1647,7 @@ under helgrind still finds lock-order inversions, because those are structural, 
 ## 11. The review log — holes found by attacking version 1 on purpose
 
 Version 1 was reviewed by six adversarial passes — durability, concurrency, LSM design,
-scope/API, testability, and résumé honesty — each instructed to **break the document, not
+scope/API, testability, and claim honesty — each instructed to **break the document, not
 approve it**, and each finding was then handed to a skeptic instructed to **refute it** and to
 default to "already covered" when uncertain.
 
