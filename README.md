@@ -385,41 +385,6 @@ scripts/          dev.sh runs anything in the container, check.sh is the full ga
 docs/             specification, bug journal, benchmarks, claims, safety audit
 ```
 
-## Known limitations
-
-These are stated rather than buried, and most of them are deliberate trades.
-
-**Reads touch more places than a B-tree would.** A key could be in any file, so a lookup may
-check several. Filters and indexes reduce that considerably but never remove it. On a
-read-heavy workload a B-tree is the better design, and that was a conscious choice.
-
-**Every byte is written more than once.** Once into the log, again into a file when the
-memtable is flushed, and again each time compaction moves it down a tier. That is the price
-of never doing a random write.
-
-**There is one background thread**, handling both flushes and compactions, and a running
-compaction is never interrupted. So a long merge deep in the tiers can delay an urgent
-tier-0 flush. This was chosen on purpose: one background thread means only one thread ever
-writes the manifest, which removes an entire class of race rather than guarding against it.
-
-**Durability is verified against process crashes, not power loss.** The tests kill the
-writing process and assert that nothing acknowledged was lost, and separately simulate lost
-un-`fsync`ed writes. Power-loss durability is not claimed, because `fsync` inside a container
-on Docker Desktop for macOS crosses a virtualisation boundary and that chain is not a
-hardware guarantee.
-
-**One process per database directory**, enforced with `flock` plus a pid-based fallback for
-filesystems where `flock` does not actually exclude.
-
-**Blocks are not compressed.** The format reserves a byte for it and the reader rejects
-anything it does not recognise, but only uncompressed blocks are written. Keys *are*
-prefix-compressed within a block, which is a different mechanism.
-
-**Compaction is count-triggered tiering**, not size-bucketed like Cassandra's. On a workload
-that overwrites a small key set forever, equally sized files can accumulate in different
-tiers without ever being paired; `max_tiers` bounds the damage, and size-bucketed selection
-is the named next step.
-
 ## Documentation
 
 | Document | What is in it |
