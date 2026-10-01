@@ -75,7 +75,7 @@ format."
 ## C2 🧱 Docker daemon not running — caught during planning, not during a build
 
 **Symptom.** `docker version` returned
-`failed to connect to the docker API at unix:///Users/karthikalladi/.docker/run/docker.sock
+`failed to connect to the docker API at unix:///Users/<user>/.docker/run/docker.sock
 … no such file or directory`, and — worth noting — **exited 0 anyway**.
 
 **Hypotheses.**

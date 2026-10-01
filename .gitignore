@@ -1,9 +1,52 @@
+# ---------------------------------------------------------------------------
+# Build trees. All three are produced by the verification gate:
+#     ./scripts/dev.sh ./scripts/check.sh
+# which configures and builds build-none (-O2), build-address (ASan+UBSan)
+# and build-thread (TSan), then runs every suite in each.
+# ---------------------------------------------------------------------------
 build-*/
-scratch/
-.DS_Store
-*.o
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
 compile_commands.json
+
+# Compiled output
+*.o
+*.a
+*.so
+*.dylib
+*.gcda
+*.gcno
+
+# ---------------------------------------------------------------------------
+# Scratch space and generated databases. Tests and benchmarks write their
+# database directories under $LSMENG_TEST_DIR (default /data inside the
+# container), never into the source tree; scratch/ is the local escape hatch.
+# Regenerate benchmark data with, e.g.:
+#     ./build-none/bench --bench fillrandom --num 40000 --db /data/ws
+# ---------------------------------------------------------------------------
+scratch/
+*.sst
+*.log
+MANIFEST-*
+CURRENT
+LOCK
+
+# Profiler and valgrind output. Regenerate with:
+#     perf record -e cpu-clock ./build-none/bench ...
+#     valgrind --tool=massif ./build-none/bench ...
 perf.data*
 callgrind.out.*
 cachegrind.out.*
 massif.out.*
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Working notes, not part of the project
+context3.md
